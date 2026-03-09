@@ -26,8 +26,8 @@ public class RestApiWithRetry {
         return executeWithAuthRetry(() -> restApi.put(endpoint, body, responseType));
     }
 
-    public <T> void deleteWithAuthRetry(String endpoint) {
-        executeWithAuthRetry(() -> restApi.delete(endpoint, Void.class));
+    public <T> T deleteWithAuthRetry(String endpoint, Class<T> responseType) {
+        return executeWithAuthRetry(() -> restApi.delete(endpoint, responseType));
     }
 
     private <T> T executeWithAuthRetry(ApiCall<T> apiCall) {

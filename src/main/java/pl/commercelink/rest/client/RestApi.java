@@ -11,10 +11,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-/*
-    This class can't be used as a Spring Bean because it needs to be instantiated in Store context;
-    Additionally, it is not thread-safe due to the mutable headers and bearerToken fields.
- */
 public class RestApi {
 
     private final JsonHttpClient httpClient;
@@ -22,11 +18,17 @@ public class RestApi {
     private final String baseUrl;
     private String bearerToken;
 
-    private final Map<String, String> defaultHeaders = new HashMap<>();
+    private final Map<String, String> defaultHeaders;
+
+    private RestApi(String baseUrl, String bearerToken, Map<String, String> defaultHeaders) {
+        this.baseUrl = baseUrl;
+        this.bearerToken = bearerToken;
+        this.defaultHeaders = defaultHeaders;
+        this.httpClient = new JsonHttpClient();
+    }
 
     public RestApi(String baseUrl) {
-        this.baseUrl = baseUrl;
-        this.httpClient = new JsonHttpClient();
+        this(baseUrl, null, new HashMap<>());
     }
 
     public <T> T fetch(String endpoint, Class<T> responseType) {
@@ -120,10 +122,36 @@ public class RestApi {
         return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
-    public void addDefaultHeaders(String headerKey, String headerValue) {
-        defaultHeaders.put(headerKey, headerValue);
+    void setBearerToken(String bearerToken) {
+        this.bearerToken = bearerToken;
     }
 
-    public void setBearerToken(String bearerToken) { this.bearerToken = bearerToken; }
+    public static Builder builder(String baseUrl) {
+        return new Builder(baseUrl);
+    }
+
+    public static class Builder {
+        private final String baseUrl;
+        private String bearerToken;
+        private final Map<String, String> defaultHeaders = new HashMap<>();
+
+        private Builder(String baseUrl) {
+            this.baseUrl = baseUrl;
+        }
+
+        public Builder bearerToken(String bearerToken) {
+            this.bearerToken = bearerToken;
+            return this;
+        }
+
+        public Builder defaultHeader(String key, String value) {
+            this.defaultHeaders.put(key, value);
+            return this;
+        }
+
+        public RestApi build() {
+            return new RestApi(baseUrl, bearerToken, new HashMap<>(defaultHeaders));
+        }
+    }
 
 }

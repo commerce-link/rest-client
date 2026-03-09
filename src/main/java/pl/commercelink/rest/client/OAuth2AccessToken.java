@@ -2,7 +2,7 @@ package pl.commercelink.rest.client;
 
 import java.time.Instant;
 
-public class OAuth2AccessToken extends AbstractOAuth2Token {
+class OAuth2AccessToken extends AbstractOAuth2Token {
 
     private OAuth2AccessToken () {
 

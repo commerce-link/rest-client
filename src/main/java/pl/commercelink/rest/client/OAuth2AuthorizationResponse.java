@@ -2,7 +2,7 @@ package pl.commercelink.rest.client;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 
-public class OAuth2AuthorizationResponse {
+class OAuth2AuthorizationResponse {
 
     @JsonProperty("access_token")
     private  String accessToken;
