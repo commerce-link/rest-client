@@ -6,4 +6,7 @@ public interface OAuth2CredentialStore {
 
     OAuth2Secrets getSecrets(String key, String tokenName);
 
+    default void deleteSecrets(String key, String tokenName) {
+    }
+
 }

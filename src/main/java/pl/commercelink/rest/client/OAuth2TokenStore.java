@@ -8,4 +8,7 @@ public interface OAuth2TokenStore {
 
     void storeToken(String key, String tokenName, String tokenType, Object token);
 
+    default void deleteToken(String key, String tokenName, String tokenType) {
+    }
+
 }
