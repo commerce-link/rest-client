@@ -21,8 +21,6 @@ jobs:
           java-version: "21"
           distribution: temurin
           server-id: github
-          server-username: ${{ github.actor }}
-          server-password: ${{ secrets.GITHUB_TOKEN }}
           settings-path: ${{ github.workspace }}
 
       - name: Deploy to GitHub Packages
