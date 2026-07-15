@@ -34,14 +34,31 @@ public class ConfigurableOAuth2AuthorizationService {
             String refreshTokenEndpoint,
             long refreshTokenExpirationInSeconds,
             Consumer<String> connectionLostHandler) {
+        this(credentialStore, tokenStore, new JsonHttpClient(), tokenName, authorizationEndpoint,
+                refreshTokenEndpoint, refreshTokenExpirationInSeconds, connectionLostHandler);
+    }
+
+    ConfigurableOAuth2AuthorizationService(
+            OAuth2CredentialStore credentialStore,
+            OAuth2TokenStore tokenStore,
+            JsonHttpClient httpClient,
+            String tokenName,
+            String authorizationEndpoint,
+            String refreshTokenEndpoint,
+            long refreshTokenExpirationInSeconds,
+            Consumer<String> connectionLostHandler) {
         this.credentialStore = credentialStore;
         this.tokenStore = tokenStore;
-        this.httpClient = new JsonHttpClient();
+        this.httpClient = httpClient;
         this.tokenName = tokenName;
         this.authorizationEndpoint = authorizationEndpoint;
         this.refreshTokenEndpoint = refreshTokenEndpoint;
         this.refreshTokenExpirationInSeconds = refreshTokenExpirationInSeconds;
         this.connectionLostHandler = connectionLostHandler;
+    }
+
+    static boolean isAuthorizationLost(int statusCode) {
+        return statusCode == 400 || statusCode == 403;
     }
 
     public String getAccessToken(String storeId) {
@@ -75,7 +92,7 @@ public class ConfigurableOAuth2AuthorizationService {
             storeCredentials(storeId, authResponse);
             return authResponse.getAccessToken();
         } catch (HttpClientException e) {
-            if (e.getStatusCode() == 403) {
+            if (isAuthorizationLost(e.getStatusCode())) {
                 connectionLostHandler.accept(storeId);
             }
             return null;
@@ -97,7 +114,7 @@ public class ConfigurableOAuth2AuthorizationService {
             storeCredentials(storeId, authResponse);
             return authResponse.getAccessToken();
         } catch (HttpClientException e) {
-            if (e.getStatusCode() == 403) {
+            if (isAuthorizationLost(e.getStatusCode())) {
                 connectionLostHandler.accept(storeId);
             }
             return null;
