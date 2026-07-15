@@ -61,6 +61,15 @@ public class ConfigurableOAuth2AuthorizationService {
         return statusCode == 400 || statusCode == 403;
     }
 
+    static boolean isRefreshTokenRejected(HttpClientException e) {
+        if (e.getStatusCode() == 403) {
+            return true;
+        }
+        return e.getStatusCode() == 400
+                && e.getResponseBody() != null
+                && e.getResponseBody().contains("invalid_grant");
+    }
+
     public String getAccessToken(String storeId) {
         Optional<OAuth2AccessToken> op = tokenStore.getToken(
                 storeId, tokenName, ACCESS_TOKEN, OAuth2AccessToken.class);
@@ -114,7 +123,7 @@ public class ConfigurableOAuth2AuthorizationService {
             storeCredentials(storeId, authResponse);
             return authResponse.getAccessToken();
         } catch (HttpClientException e) {
-            if (isAuthorizationLost(e.getStatusCode())) {
+            if (isRefreshTokenRejected(e)) {
                 connectionLostHandler.accept(storeId);
             }
             return null;

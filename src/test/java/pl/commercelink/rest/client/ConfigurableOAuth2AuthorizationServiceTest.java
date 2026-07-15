@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ConfigurableOAuth2AuthorizationServiceTest {
 
     @Test
-    void authorizationLostForBadRequestAndForbidden() {
+    void authorizeAuthorizationLostForBadRequestAndForbidden() {
         // given / when / then
         assertTrue(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(400));
         assertTrue(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(403));
@@ -25,7 +25,22 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     }
 
     @Test
-    void invalidGrantOnRefreshInvokesConnectionLostHandler() {
+    void refreshTokenRejectedForForbiddenAndInvalidGrantOnly() {
+        // given / when / then
+        assertTrue(ConfigurableOAuth2AuthorizationService.isRefreshTokenRejected(
+                new HttpClientException(403, "{\"error\":\"forbidden\"}")));
+        assertTrue(ConfigurableOAuth2AuthorizationService.isRefreshTokenRejected(
+                new HttpClientException(400, "{\"error\":\"invalid_grant\"}")));
+        assertFalse(ConfigurableOAuth2AuthorizationService.isRefreshTokenRejected(
+                new HttpClientException(400, "{\"error\":\"invalid_request\"}")));
+        assertFalse(ConfigurableOAuth2AuthorizationService.isRefreshTokenRejected(
+                new HttpClientException(400, null)));
+        assertFalse(ConfigurableOAuth2AuthorizationService.isRefreshTokenRejected(
+                new HttpClientException(401, "{\"error\":\"invalid_grant\"}")));
+    }
+
+    @Test
+    void refreshWith400InvalidGrantMarksConnectionLost() {
         // given
         String storeId = "store-1";
         FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
@@ -34,6 +49,95 @@ class ConfigurableOAuth2AuthorizationServiceTest {
                 new OAuth2RefreshToken("refresh-token-value", Instant.now(), Instant.now().plusSeconds(3600)));
         ThrowingJsonHttpClient throwingHttpClient = new ThrowingJsonHttpClient(
                 new HttpClientException(400, "{\"error\":\"invalid_grant\"}"));
+        List<String> lostConnections = new ArrayList<>();
+
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                credentialStore,
+                tokenStore,
+                throwingHttpClient,
+                "allegro",
+                "https://allegro.pl/auth/oauth/token",
+                "https://allegro.pl/auth/oauth/token",
+                3600L,
+                lostConnections::add);
+
+        // when
+        String accessToken = service.getAccessToken(storeId);
+
+        // then
+        assertNull(accessToken);
+        assertEquals(List.of(storeId), lostConnections);
+    }
+
+    @Test
+    void refreshWithOther400DoesNotMarkConnectionLost() {
+        // given
+        String storeId = "store-1";
+        FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
+                new OAuth2Secrets("client-id", "client-secret"));
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2RefreshToken("refresh-token-value", Instant.now(), Instant.now().plusSeconds(3600)));
+        ThrowingJsonHttpClient throwingHttpClient = new ThrowingJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_request\"}"));
+        List<String> lostConnections = new ArrayList<>();
+
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                credentialStore,
+                tokenStore,
+                throwingHttpClient,
+                "allegro",
+                "https://allegro.pl/auth/oauth/token",
+                "https://allegro.pl/auth/oauth/token",
+                3600L,
+                lostConnections::add);
+
+        // when
+        String accessToken = service.getAccessToken(storeId);
+
+        // then
+        assertNull(accessToken);
+        assertTrue(lostConnections.isEmpty());
+    }
+
+    @Test
+    void refreshWith403MarksConnectionLost() {
+        // given
+        String storeId = "store-1";
+        FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
+                new OAuth2Secrets("client-id", "client-secret"));
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2RefreshToken("refresh-token-value", Instant.now(), Instant.now().plusSeconds(3600)));
+        ThrowingJsonHttpClient throwingHttpClient = new ThrowingJsonHttpClient(
+                new HttpClientException(403, "{\"error\":\"forbidden\"}"));
+        List<String> lostConnections = new ArrayList<>();
+
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                credentialStore,
+                tokenStore,
+                throwingHttpClient,
+                "allegro",
+                "https://allegro.pl/auth/oauth/token",
+                "https://allegro.pl/auth/oauth/token",
+                3600L,
+                lostConnections::add);
+
+        // when
+        String accessToken = service.getAccessToken(storeId);
+
+        // then
+        assertNull(accessToken);
+        assertEquals(List.of(storeId), lostConnections);
+    }
+
+    @Test
+    void authorizeWithAny400MarksConnectionLost() {
+        // given
+        String storeId = "store-1";
+        FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
+                new OAuth2Secrets("client-id", "client-secret", "username", "password"));
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(null);
+        ThrowingJsonHttpClient throwingHttpClient = new ThrowingJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_request\"}"));
         List<String> lostConnections = new ArrayList<>();
 
         ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
@@ -83,7 +187,7 @@ class ConfigurableOAuth2AuthorizationServiceTest {
         @Override
         @SuppressWarnings("unchecked")
         public <T> Optional<T> getToken(String key, String tokenName, String tokenType, Class<T> clazz) {
-            if (ConfigurableOAuth2AuthorizationService.REFRESH_TOKEN.equals(tokenType)) {
+            if (ConfigurableOAuth2AuthorizationService.REFRESH_TOKEN.equals(tokenType) && refreshToken != null) {
                 return Optional.of((T) refreshToken);
             }
             return Optional.empty();
