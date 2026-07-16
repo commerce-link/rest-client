@@ -52,21 +52,30 @@ public class RestApi {
     }
 
     public <T> T post(String endpoint, Object body, Class<T> responseType) {
-        HttpRequest request = buildRequest(baseUrl + endpoint)
-                .POST(httpClient.jsonBodyPublisher(body))
-                .header("Content-Type", "application/json")
-                .build();
-
-        return execute(request, responseType);
+        return execute(buildPost(endpoint, body), responseType);
     }
 
     public <T> T put(String endpoint, Object body, Class<T> responseType) {
-        HttpRequest request = buildRequest(baseUrl + endpoint)
-                .PUT(httpClient.jsonBodyPublisher(body))
-                .header("Content-Type", "application/json")
-                .build();
+        return execute(buildPut(endpoint, body), responseType);
+    }
 
-        return execute(request, responseType);
+    HttpRequest buildPost(String endpoint, Object body) {
+        return withContentType(buildRequest(baseUrl + endpoint)
+                .POST(httpClient.jsonBodyPublisher(body)))
+                .build();
+    }
+
+    HttpRequest buildPut(String endpoint, Object body) {
+        return withContentType(buildRequest(baseUrl + endpoint)
+                .PUT(httpClient.jsonBodyPublisher(body)))
+                .build();
+    }
+
+    private HttpRequest.Builder withContentType(HttpRequest.Builder builder) {
+        if (!defaultHeaders.containsKey("Content-Type")) {
+            builder.header("Content-Type", "application/json");
+        }
+        return builder;
     }
 
     public <T> T delete(String endpoint, Class<T> responseType) {
