@@ -1,5 +1,6 @@
 package pl.commercelink.rest.client;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.net.http.HttpRequest;
@@ -10,6 +11,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -18,10 +20,12 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     @Test
     void authorizeAuthorizationLostForBadRequestAndForbidden() {
         // given / when / then
-        assertTrue(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(400));
-        assertTrue(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(403));
-        assertFalse(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(401));
-        assertFalse(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(500));
+        assertTrue(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(400, false));
+        assertFalse(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(400, true));
+        assertTrue(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(403, false));
+        assertTrue(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(403, true));
+        assertFalse(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(401, false));
+        assertFalse(ConfigurableOAuth2AuthorizationService.isAuthorizationLost(500, false));
     }
 
     @Test
@@ -130,11 +134,11 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     }
 
     @Test
-    void authorizeWithAny400MarksConnectionLost() {
+    void authorizeWith400WithoutUsernameMarksConnectionLost() {
         // given
         String storeId = "store-1";
         FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
-                new OAuth2Secrets("client-id", "client-secret", "username", "password"));
+                new OAuth2Secrets("client-id", "client-secret"));
         FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(null);
         ThrowingJsonHttpClient throwingHttpClient = new ThrowingJsonHttpClient(
                 new HttpClientException(400, "{\"error\":\"invalid_request\"}"));
@@ -158,6 +162,103 @@ class ConfigurableOAuth2AuthorizationServiceTest {
         assertEquals(List.of(storeId), lostConnections);
     }
 
+    @Test
+    void authorizeWith400WithUsernameDoesNotMarkConnectionLost() {
+        // given
+        String storeId = "store-1";
+        FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
+                new OAuth2Secrets("client-id", "client-secret", "username", "password"));
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(null);
+        ThrowingJsonHttpClient throwingHttpClient = new ThrowingJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_request\"}"));
+        List<String> lostConnections = new ArrayList<>();
+
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                credentialStore,
+                tokenStore,
+                throwingHttpClient,
+                "furgonetka",
+                "https://furgonetka.pl/oauth/token",
+                "https://furgonetka.pl/oauth/token",
+                3600L,
+                lostConnections::add);
+
+        // when
+        String accessToken = service.getAccessToken(storeId);
+
+        // then
+        assertNull(accessToken);
+        assertTrue(lostConnections.isEmpty());
+    }
+
+    @Test
+    void authorizeWith403WithUsernameMarksConnectionLost() {
+        // given
+        String storeId = "store-1";
+        FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
+                new OAuth2Secrets("client-id", "client-secret", "username", "password"));
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(null);
+        ThrowingJsonHttpClient throwingHttpClient = new ThrowingJsonHttpClient(
+                new HttpClientException(403, "{\"error\":\"forbidden\"}"));
+        List<String> lostConnections = new ArrayList<>();
+
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                credentialStore,
+                tokenStore,
+                throwingHttpClient,
+                "furgonetka",
+                "https://furgonetka.pl/oauth/token",
+                "https://furgonetka.pl/oauth/token",
+                3600L,
+                lostConnections::add);
+
+        // when
+        String accessToken = service.getAccessToken(storeId);
+
+        // then
+        assertNull(accessToken);
+        assertEquals(List.of(storeId), lostConnections);
+    }
+
+    @Test
+    void successfulRefreshPersistsRotatedTokens() throws Exception {
+        // given
+        String storeId = "store-1";
+        long refreshTokenExpirationInSeconds = 3600L;
+        FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
+                new OAuth2Secrets("client-id", "client-secret"));
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2RefreshToken("refresh-token-value", Instant.now(), Instant.now().plusSeconds(3600)));
+        OAuth2AuthorizationResponse response = new ObjectMapper().readValue(
+                "{\"access_token\":\"at-new\",\"refresh_token\":\"rt-new\",\"expires_in\":43199,"
+                        + "\"token_type\":\"bearer\"}",
+                OAuth2AuthorizationResponse.class);
+        RespondingJsonHttpClient respondingHttpClient = new RespondingJsonHttpClient(response);
+
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                credentialStore,
+                tokenStore,
+                respondingHttpClient,
+                "allegro",
+                "https://allegro.pl/auth/oauth/token",
+                "https://allegro.pl/auth/oauth/token",
+                refreshTokenExpirationInSeconds,
+                storeIdArg -> { });
+
+        // when
+        String accessToken = service.getAccessToken(storeId);
+
+        // then
+        assertEquals("at-new", accessToken);
+        assertNotNull(tokenStore.storedAccessToken);
+        assertEquals("at-new", ((OAuth2AccessToken) tokenStore.storedAccessToken).getTokenValue());
+        assertNotNull(tokenStore.storedRefreshToken);
+        OAuth2RefreshToken storedRefreshToken = (OAuth2RefreshToken) tokenStore.storedRefreshToken;
+        assertEquals("rt-new", storedRefreshToken.getTokenValue());
+        assertEquals(refreshTokenExpirationInSeconds * 1000,
+                storedRefreshToken.getExpiresAt().toEpochMilli() - storedRefreshToken.getIssuedAt().toEpochMilli());
+    }
+
     private static class FakeOAuth2CredentialStore implements OAuth2CredentialStore {
 
         private final OAuth2Secrets secrets;
@@ -179,6 +280,8 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     private static class FakeOAuth2TokenStore implements OAuth2TokenStore {
 
         private final OAuth2RefreshToken refreshToken;
+        private Object storedAccessToken;
+        private Object storedRefreshToken;
 
         FakeOAuth2TokenStore(OAuth2RefreshToken refreshToken) {
             this.refreshToken = refreshToken;
@@ -195,6 +298,11 @@ class ConfigurableOAuth2AuthorizationServiceTest {
 
         @Override
         public void storeToken(String key, String tokenName, String tokenType, Object token) {
+            if (ConfigurableOAuth2AuthorizationService.ACCESS_TOKEN.equals(tokenType)) {
+                storedAccessToken = token;
+            } else if (ConfigurableOAuth2AuthorizationService.REFRESH_TOKEN.equals(tokenType)) {
+                storedRefreshToken = token;
+            }
         }
     }
 
@@ -209,6 +317,21 @@ class ConfigurableOAuth2AuthorizationServiceTest {
         @Override
         <T> T sendAndParse(HttpRequest request, Class<T> responseType) {
             throw exception;
+        }
+    }
+
+    private static class RespondingJsonHttpClient extends JsonHttpClient {
+
+        private final OAuth2AuthorizationResponse response;
+
+        RespondingJsonHttpClient(OAuth2AuthorizationResponse response) {
+            this.response = response;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        <T> T sendAndParse(HttpRequest request, Class<T> responseType) {
+            return (T) response;
         }
     }
 }
