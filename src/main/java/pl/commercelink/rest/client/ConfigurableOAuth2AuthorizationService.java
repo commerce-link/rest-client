@@ -57,8 +57,11 @@ public class ConfigurableOAuth2AuthorizationService {
         this.connectionLostHandler = connectionLostHandler;
     }
 
-    static boolean isAuthorizationLost(int statusCode) {
-        return statusCode == 400 || statusCode == 403;
+    static boolean isAuthorizationLost(int statusCode, boolean passwordGrant) {
+        if (statusCode == 403) {
+            return true;
+        }
+        return statusCode == 400 && !passwordGrant;
     }
 
     static boolean isRefreshTokenRejected(HttpClientException e) {
@@ -101,7 +104,7 @@ public class ConfigurableOAuth2AuthorizationService {
             storeCredentials(storeId, authResponse);
             return authResponse.getAccessToken();
         } catch (HttpClientException e) {
-            if (isAuthorizationLost(e.getStatusCode())) {
+            if (isAuthorizationLost(e.getStatusCode(), secrets.getUsername() != null)) {
                 connectionLostHandler.accept(storeId);
             }
             return null;

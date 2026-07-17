@@ -59,6 +59,10 @@ public class RestApi {
         return execute(buildPut(endpoint, body), responseType);
     }
 
+    public <T> T patch(String endpoint, Object body, Class<T> responseType) {
+        return execute(buildPatch(endpoint, body), responseType);
+    }
+
     HttpRequest buildPost(String endpoint, Object body) {
         return withContentType(buildRequest(baseUrl + endpoint)
                 .POST(httpClient.jsonBodyPublisher(body)))
@@ -68,6 +72,12 @@ public class RestApi {
     HttpRequest buildPut(String endpoint, Object body) {
         return withContentType(buildRequest(baseUrl + endpoint)
                 .PUT(httpClient.jsonBodyPublisher(body)))
+                .build();
+    }
+
+    HttpRequest buildPatch(String endpoint, Object body) {
+        return withContentType(buildRequest(baseUrl + endpoint)
+                .method("PATCH", httpClient.jsonBodyPublisher(body)))
                 .build();
     }
 

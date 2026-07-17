@@ -51,4 +51,33 @@ class RestApiTest {
         assertEquals(List.of("application/vnd.allegro.public.v1+json"),
                 request.headers().allValues("Content-Type"));
     }
+
+    @Test
+    void patchUsesDefaultContentTypeHeaderWhenConfigured() {
+        // given
+        RestApi restApi = RestApi.builder("https://api.example.com")
+                .defaultHeader("Content-Type", "application/vnd.allegro.public.v1+json")
+                .build();
+
+        // when
+        HttpRequest request = restApi.buildPatch("/sale/product-offers/1", Map.of());
+
+        // then
+        assertEquals("PATCH", request.method());
+        assertEquals(List.of("application/vnd.allegro.public.v1+json"),
+                request.headers().allValues("Content-Type"));
+    }
+
+    @Test
+    void patchDefaultsToApplicationJsonContentType() {
+        // given
+        RestApi restApi = RestApi.builder("https://api.example.com").build();
+
+        // when
+        HttpRequest request = restApi.buildPatch("/sale/product-offers/1", Map.of());
+
+        // then
+        assertEquals("PATCH", request.method());
+        assertEquals(List.of("application/json"), request.headers().allValues("Content-Type"));
+    }
 }
