@@ -6,6 +6,7 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -13,22 +14,26 @@ import java.util.stream.Collectors;
 
 public class RestApi {
 
+    private static final Duration DEFAULT_REQUEST_TIMEOUT = Duration.ofSeconds(60);
+
     private final JsonHttpClient httpClient;
 
     private final String baseUrl;
     private String bearerToken;
 
     private final Map<String, String> defaultHeaders;
+    private final Duration requestTimeout;
 
-    private RestApi(String baseUrl, String bearerToken, Map<String, String> defaultHeaders) {
+    private RestApi(String baseUrl, String bearerToken, Map<String, String> defaultHeaders, Duration requestTimeout) {
         this.baseUrl = baseUrl;
         this.bearerToken = bearerToken;
         this.defaultHeaders = defaultHeaders;
+        this.requestTimeout = requestTimeout != null ? requestTimeout : DEFAULT_REQUEST_TIMEOUT;
         this.httpClient = new JsonHttpClient();
     }
 
     public RestApi(String baseUrl) {
-        this(baseUrl, null, new HashMap<>());
+        this(baseUrl, null, new HashMap<>(), DEFAULT_REQUEST_TIMEOUT);
     }
 
     public <T> T fetch(String endpoint, Class<T> responseType) {
@@ -102,7 +107,8 @@ public class RestApi {
 
     private HttpRequest.Builder buildRequest(String url) {
         HttpRequest.Builder builder = HttpRequest.newBuilder()
-                .uri(URI.create(url));
+                .uri(URI.create(url))
+                .timeout(requestTimeout);
 
         if (bearerToken != null) {
             builder.header("Authorization", "Bearer " + bearerToken);
@@ -153,6 +159,7 @@ public class RestApi {
         private final String baseUrl;
         private String bearerToken;
         private final Map<String, String> defaultHeaders = new HashMap<>();
+        private Duration requestTimeout = DEFAULT_REQUEST_TIMEOUT;
 
         private Builder(String baseUrl) {
             this.baseUrl = baseUrl;
@@ -168,8 +175,13 @@ public class RestApi {
             return this;
         }
 
+        public Builder requestTimeout(Duration requestTimeout) {
+            this.requestTimeout = requestTimeout;
+            return this;
+        }
+
         public RestApi build() {
-            return new RestApi(baseUrl, bearerToken, new HashMap<>(defaultHeaders));
+            return new RestApi(baseUrl, bearerToken, new HashMap<>(defaultHeaders), requestTimeout);
         }
     }
 

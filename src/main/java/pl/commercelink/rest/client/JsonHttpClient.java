@@ -7,14 +7,19 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 
 class JsonHttpClient {
+
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
 
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
     JsonHttpClient() {
-        this.httpClient = HttpClient.newHttpClient();
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(CONNECT_TIMEOUT)
+                .build();
         this.objectMapper = new ObjectMapper();
         this.objectMapper.registerModule(new JavaTimeModule());
     }
