@@ -18,8 +18,18 @@ public class RestApiWithRetry {
         return executeWithAuthRetry(() -> restApi.fetch(endpoint, params, responseType));
     }
 
+    public <T> T fetchWithAuthRetry(String endpoint, Map<String, String> params, Map<String, String> headers,
+                                    Class<T> responseType) {
+        return executeWithAuthRetry(() -> restApi.fetch(endpoint, params, headers, responseType));
+    }
+
     public <T> T postWithAuthRetry(String endpoint, Object body, Class<T> responseType) {
         return executeWithAuthRetry(() -> restApi.post(endpoint, body, responseType));
+    }
+
+    public <T> T postWithAuthRetry(String endpoint, Object body, Map<String, String> headers,
+                                   Class<T> responseType) {
+        return executeWithAuthRetry(() -> restApi.post(endpoint, body, headers, responseType));
     }
 
     public <T> T putWithAuthRetry(String endpoint, Object body, Class<T> responseType) {
