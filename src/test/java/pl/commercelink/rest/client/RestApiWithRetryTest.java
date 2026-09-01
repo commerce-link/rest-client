@@ -8,6 +8,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -55,5 +57,40 @@ class RestApiWithRetryTest {
 
         // then
         verify(restApi).post("/x", body, beta, String.class);
+    }
+
+    @Test
+    void fetchWithAuthRetryRefreshesTokenAndRetriesOnceThroughTheHeaderOverload() {
+        // given: a 401 on the first call, then success once the token is refreshed
+        Map<String, String> beta = Map.of("Accept", "application/vnd.allegro.beta.v1+json");
+        when(restApi.fetch("/x", Map.of(), beta, String.class))
+                .thenThrow(new HttpClientException(401, "expired"))
+                .thenReturn("ok");
+
+        // when
+        String result = apiWithRetry.fetchWithAuthRetry("/x", Map.of(), beta, String.class);
+
+        // then: the token is refreshed once and the retry keeps forwarding the same headers
+        assertEquals("ok", result);
+        verify(restApi).setBearerToken("token");
+        verify(restApi, times(2)).fetch("/x", Map.of(), beta, String.class);
+    }
+
+    @Test
+    void postWithAuthRetryRefreshesTokenAndRetriesOnceThroughTheHeaderOverload() {
+        // given
+        Map<String, String> beta = Map.of("Accept", "application/vnd.allegro.beta.v1+json");
+        Object body = new Object();
+        when(restApi.post("/x", body, beta, String.class))
+                .thenThrow(new HttpClientException(401, "expired"))
+                .thenReturn("ok");
+
+        // when
+        String result = apiWithRetry.postWithAuthRetry("/x", body, beta, String.class);
+
+        // then
+        assertEquals("ok", result);
+        verify(restApi).setBearerToken("token");
+        verify(restApi, times(2)).post("/x", body, beta, String.class);
     }
 }
