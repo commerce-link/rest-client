@@ -118,6 +118,21 @@ class RestApiTest {
     }
 
     @Test
+    void perRequestHeaderOverridesADefaultWithDifferentCasing() {
+        // given: HTTP header names are case-insensitive, HashMap is not, and Builder.header() appends
+        RestApi restApi = RestApi.builder("https://api.example.com")
+                .defaultHeader("Accept", "application/json")
+                .build();
+
+        // when
+        HttpRequest request = restApi.buildGet("/x", Map.of(),
+                Map.of("accept", "application/vnd.allegro.beta.v1+json"));
+
+        // then
+        assertEquals(List.of("application/vnd.allegro.beta.v1+json"), request.headers().allValues("Accept"));
+    }
+
+    @Test
     void emptyPerRequestHeadersFallBackToDefaults() {
         // given
         RestApi restApi = RestApi.builder("https://api.example.com").build();

@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 public class RestApi {
@@ -104,7 +105,10 @@ public class RestApi {
     }
 
     private HttpRequest.Builder withContentType(HttpRequest.Builder builder, Map<String, String> headers) {
-        if (!defaultHeaders.containsKey("Content-Type") && !headers.containsKey("Content-Type")) {
+        Map<String, String> effective = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        effective.putAll(defaultHeaders);
+        effective.putAll(headers);
+        if (!effective.containsKey("Content-Type")) {
             builder.header("Content-Type", "application/json");
         }
         return builder;
@@ -137,7 +141,8 @@ public class RestApi {
             builder.header("Authorization", "Bearer " + bearerToken);
         }
 
-        Map<String, String> effective = new HashMap<>(defaultHeaders);
+        Map<String, String> effective = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        effective.putAll(defaultHeaders);
         effective.putAll(headers);
         if (!effective.containsKey("Accept")) {
             builder.header("Accept", "application/json");
