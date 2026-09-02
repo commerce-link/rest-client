@@ -77,7 +77,13 @@ public class RestApiWithRetry {
                     rejected = cachedTokenFailure;
                 }
             }
-            String renewed = accessTokenRenewer.get();
+            String renewed;
+            try {
+                renewed = accessTokenRenewer.get();
+            } catch (RuntimeException renewalFailure) {
+                renewalFailure.addSuppressed(rejected);
+                throw renewalFailure;
+            }
             if (renewed == null || renewed.equals(bearerToken)) {
                 // no token, or a renewal cooldown loser handed back the token that was just rejected:
                 // a third attempt would fail for sure

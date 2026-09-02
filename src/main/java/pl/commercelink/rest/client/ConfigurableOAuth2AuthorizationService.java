@@ -124,7 +124,7 @@ public class ConfigurableOAuth2AuthorizationService {
      * At most one renewal per {@link #RENEWAL_COOLDOWN} runs per store and token name; the window is shared
      * by every instance of this class in the JVM. Inside the window the cached token is handed out instead.
      * The cached access token is only ever replaced, never emptied, so a concurrent caller never finds an
-     * empty cache and never triggers a refresh grant of its own with an already rotated refresh token.
+     * empty cache; only a locally expired cached token still makes {@link #getAccessToken} refresh on its own.
      * <p>
      * Returns null when no new token could be obtained.
      */
@@ -200,7 +200,7 @@ public class ConfigurableOAuth2AuthorizationService {
                 } catch (HttpClientException fallbackFailure) {
                     if (fallbackFailure.getStatusCode() < 500) {
                         // the refresh token was rejected and the password grant was refused too: the account
-                        // is unusable; a 5xx or a timeout on the token endpoint is an outage, not a revocation
+                        // is unusable; a 5xx on the token endpoint is an outage, not a revocation
                         connectionLostHandler.accept(storeId);
                     }
                     return null;
@@ -252,7 +252,7 @@ public class ConfigurableOAuth2AuthorizationService {
     }
 
     private void storeCredentials(String storeId, OAuth2AuthorizationResponse authResponse) {
-        long now = System.currentTimeMillis();
+        long now = clock.millis();
         long accessTokenExpiryTime = now + authResponse.getExpiresIn() * 1000;
         long refreshTokenExpiryTime = now + refreshTokenExpirationInSeconds * 1000;
 

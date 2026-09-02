@@ -106,7 +106,7 @@ class RestApiWithRetryTest {
     }
 
     @Test
-    void failedRenewalRethrowsTheOriginalUnauthorizedResponse() {
+    void failedRenewalRethrowsTheUnauthorizedResponse() {
         // given
         FakeRestApi api = new FakeRestApi("at-new");
         RestApiWithRetry retry = new RestApiWithRetry(api, () -> "at-revoked", () -> null);
@@ -117,6 +117,21 @@ class RestApiWithRetryTest {
         assertEquals(401, e.getStatusCode());
         assertEquals(2, api.calls);
         assertEquals(List.of("at-revoked"), api.tokensSet);
+    }
+
+    @Test
+    void renewerFailureCarriesTheUnauthorizedResponseAsSuppressed() {
+        // given: the renewer cannot reach the token endpoint
+        FakeRestApi api = new FakeRestApi("at-new");
+        RestApiWithRetry retry = new RestApiWithRetry(api, () -> "at-revoked", () -> {
+            throw new IllegalStateException("token endpoint down");
+        });
+
+        // when / then
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> retry.fetchWithAuthRetry("/account", Map.of(), String.class));
+        assertEquals(1, e.getSuppressed().length);
+        assertEquals(401, ((HttpClientException) e.getSuppressed()[0]).getStatusCode());
     }
 
     @Test
