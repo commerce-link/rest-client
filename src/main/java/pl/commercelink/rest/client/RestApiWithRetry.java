@@ -60,7 +60,12 @@ public class RestApiWithRetry {
             }
             HttpClientException rejected = e;
             String cached = accessTokenSupplier.get();
-            if (cached != null && !cached.equals(bearerToken)) {
+            if (cached == null) {
+                // the supplier could not obtain a token at all: the renewer would repeat the same failing
+                // refresh (and could signal connection lost a second time)
+                throw e;
+            }
+            if (!cached.equals(bearerToken)) {
                 // lazy bootstrap, or another caller already renewed: try the cached token before renewing
                 applyToken(cached);
                 try {
@@ -73,7 +78,9 @@ public class RestApiWithRetry {
                 }
             }
             String renewed = accessTokenRenewer.get();
-            if (renewed == null) {
+            if (renewed == null || renewed.equals(bearerToken)) {
+                // no token, or a renewal cooldown loser handed back the token that was just rejected:
+                // a third attempt would fail for sure
                 throw rejected;
             }
             applyToken(renewed);

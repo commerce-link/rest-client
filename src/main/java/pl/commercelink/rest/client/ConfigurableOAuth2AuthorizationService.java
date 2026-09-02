@@ -118,8 +118,14 @@ public class ConfigurableOAuth2AuthorizationService {
     }
 
     /**
-     * Called after the API answered 401: the cached access token is treated as revoked regardless of its
-     * local expiry, evicted, and a new one is obtained through the regular refresh / authorize path.
+     * Called after the API answered 401: the cached access token is treated as revoked and refreshed
+     * regardless of its local expiry, through the regular refresh / authorize path.
+     * <p>
+     * At most one renewal per {@link #RENEWAL_COOLDOWN} runs per store and token name; the window is shared
+     * by every instance of this class in the JVM. Inside the window the cached token is handed out instead.
+     * The cached access token is only ever replaced, never emptied, so a concurrent caller never finds an
+     * empty cache and never triggers a refresh grant of its own with an already rotated refresh token.
+     * <p>
      * Returns null when no new token could be obtained.
      */
     public synchronized String renewAccessToken(String storeId) {
@@ -133,12 +139,15 @@ public class ConfigurableOAuth2AuthorizationService {
             return now;
         });
         if (!renewalWon.get()) {
-            // another call renewed the token a moment ago (or the account is genuinely broken):
-            // hand out whatever the cache holds instead of hammering the token endpoint
-            return getAccessToken(storeId);
+            // another call renewed the token a moment ago (or the account is genuinely broken): hand out
+            // whatever the cache holds, read directly so that a loser can never reach the token endpoint
+            return tokenStore.getToken(storeId, tokenName, ACCESS_TOKEN, OAuth2AccessToken.class)
+                    .map(OAuth2AccessToken::getTokenValue)
+                    .orElse(null);
         }
         log.warn("Access token for {} rejected by the API, renewing (store={})", tokenName, storeId);
-        tokenStore.deleteToken(storeId, tokenName, ACCESS_TOKEN);
+        // the cached access token is deliberately kept until the refresh succeeds and overwrites it:
+        // evicting it first would let a concurrent caller spend the same (single-use) refresh token
         return refreshAccessToken(storeId);
     }
 
@@ -189,8 +198,11 @@ public class ConfigurableOAuth2AuthorizationService {
                 try {
                     return requestPasswordGrant(storeId, secrets);
                 } catch (HttpClientException fallbackFailure) {
-                    // the refresh token was rejected and the password grant failed too: the account is unusable
-                    connectionLostHandler.accept(storeId);
+                    if (fallbackFailure.getStatusCode() < 500) {
+                        // the refresh token was rejected and the password grant was refused too: the account
+                        // is unusable; a 5xx or a timeout on the token endpoint is an outage, not a revocation
+                        connectionLostHandler.accept(storeId);
+                    }
                     return null;
                 }
             }

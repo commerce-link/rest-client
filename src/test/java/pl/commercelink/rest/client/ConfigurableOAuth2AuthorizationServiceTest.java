@@ -269,7 +269,7 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     }
 
     @Test
-    void renewAccessTokenEvictsCachedAccessTokenAndRefreshesEvenWhenNotExpired() throws Exception {
+    void renewAccessTokenRefreshesEvenWhenTheCachedTokenIsNotExpired() throws Exception {
         // given: cached access token still valid for 30 days according to the local clock
         // unique per test: the renewal cooldown is shared static state
         String storeId = "store-" + UUID.randomUUID();
@@ -286,11 +286,36 @@ class ConfigurableOAuth2AuthorizationServiceTest {
         // when
         String renewed = service.renewAccessToken(storeId);
 
-        // then
+        // then: the cache is replaced, never emptied, so concurrent callers keep seeing a usable token
         assertEquals("at-new", renewed);
-        assertEquals(List.of(ConfigurableOAuth2AuthorizationService.ACCESS_TOKEN), tokenStore.deletedTokenTypes);
+        assertTrue(tokenStore.deletedTokenTypes.isEmpty());
         assertEquals("at-new", ((OAuth2AccessToken) tokenStore.storedAccessToken).getTokenValue());
         assertEquals("at-new", service.getAccessToken(storeId));
+        assertEquals(1, http.calls);
+    }
+
+    @Test
+    void renewalCooldownLoserNeverCallsTheTokenEndpointEvenWithAnEmptyCache() throws Exception {
+        // given: two service instances over the same store, and a cache that goes empty behind their back
+        String storeId = "store-" + UUID.randomUUID();
+        Instant start = Instant.parse("2026-09-02T12:00:00Z");
+        MutableClock clock = new MutableClock(start);
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", start, start.plusSeconds(2_592_000)),
+                new OAuth2RefreshToken("rt-old", start, start.plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(tokenResponse("at-new", "rt-new"));
+        ConfigurableOAuth2AuthorizationService instanceA = furgonetkaService(tokenStore, http, clock);
+        ConfigurableOAuth2AuthorizationService instanceB = furgonetkaService(tokenStore, http, clock);
+
+        // when
+        String first = instanceA.renewAccessToken(storeId);
+        tokenStore.deleteToken(storeId, "furgonetka", ConfigurableOAuth2AuthorizationService.ACCESS_TOKEN);
+        clock.set(start.plusSeconds(5));
+        String second = instanceB.renewAccessToken(storeId);
+
+        // then: the loser gives up instead of spending the (already rotated) refresh token
+        assertEquals("at-new", first);
+        assertNull(second);
         assertEquals(1, http.calls);
     }
 
@@ -498,6 +523,33 @@ class ConfigurableOAuth2AuthorizationServiceTest {
         // then
         assertNull(renewed);
         assertEquals(List.of(storeId), lostConnections);
+        assertEquals(2, http.calls);
+    }
+
+    @Test
+    void passwordGrantFallbackFailingWithServerErrorDoesNotMarkConnectionLost() {
+        // given: the refresh token was rejected and the token endpoint is then down
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", Instant.now(), Instant.now().plusSeconds(3600)),
+                new OAuth2RefreshToken("rt-revoked", Instant.now(), Instant.now().plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_grant\"}"),
+                new HttpClientException(503, "service unavailable"));
+        List<String> lostConnections = new ArrayList<>();
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret", "user@example.com", "secret")),
+                tokenStore, http, Clock.systemUTC(),
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, lostConnections::add);
+
+        // when
+        String renewed = service.renewAccessToken(storeId);
+
+        // then: an outage must not look like a revoked account
+        assertNull(renewed);
+        assertTrue(lostConnections.isEmpty());
         assertEquals(2, http.calls);
     }
 

@@ -189,6 +189,43 @@ class RestApiWithRetryTest {
     }
 
     @Test
+    void nullCachedTokenRethrowsWithoutRenewing() {
+        // given: the supplier itself could not obtain a token, so the renewer would repeat the same failure
+        FakeRestApi api = new FakeRestApi("at-new");
+        AtomicInteger renewals = new AtomicInteger();
+        RestApiWithRetry retry = new RestApiWithRetry(api, () -> null, () -> {
+            renewals.incrementAndGet();
+            return "at-new";
+        });
+
+        // when / then
+        HttpClientException e = assertThrows(HttpClientException.class,
+                () -> retry.fetchWithAuthRetry("/account", Map.of(), String.class));
+        assertEquals(401, e.getStatusCode());
+        assertEquals(0, renewals.get());
+        assertEquals(1, api.calls);
+        assertEquals(List.of(), api.tokensSet);
+    }
+
+    @Test
+    void renewerReturningTheRejectedTokenRethrowsWithoutAThirdAttempt() {
+        // given: a renewal cooldown loser hands back the token the API has just rejected
+        FakeRestApi api = new FakeRestApi("at-new");
+        AtomicInteger renewals = new AtomicInteger();
+        RestApiWithRetry retry = new RestApiWithRetry(api, () -> "at-revoked", () -> {
+            renewals.incrementAndGet();
+            return "at-revoked";
+        });
+
+        // when / then
+        HttpClientException e = assertThrows(HttpClientException.class,
+                () -> retry.fetchWithAuthRetry("/account", Map.of(), String.class));
+        assertEquals(401, e.getStatusCode());
+        assertEquals(1, renewals.get());
+        assertEquals(2, api.calls);
+    }
+
+    @Test
     void legacyConstructorKeepsUsingTheSupplierAfterUnauthorized() {
         // given: adapters built with the two-argument constructor behave as before
         FakeRestApi api = new FakeRestApi("at-new");
