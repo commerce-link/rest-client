@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.net.http.HttpRequest;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -259,6 +260,38 @@ class ConfigurableOAuth2AuthorizationServiceTest {
                 storedRefreshToken.getExpiresAt().toEpochMilli() - storedRefreshToken.getIssuedAt().toEpochMilli());
     }
 
+    @Test
+    void renewAccessTokenEvictsCachedAccessTokenAndRefreshesEvenWhenNotExpired() throws Exception {
+        // given: cached access token still valid for 30 days according to the local clock
+        String storeId = "store-1";
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", Instant.now(), Instant.now().plusSeconds(2_592_000)),
+                new OAuth2RefreshToken("rt-old", Instant.now(), Instant.now().plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(tokenResponse("at-new", "rt-new"));
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret")),
+                tokenStore, http, Clock.systemUTC(),
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, storeIdArg -> { });
+
+        // when
+        String renewed = service.renewAccessToken(storeId);
+
+        // then
+        assertEquals("at-new", renewed);
+        assertEquals(List.of(ConfigurableOAuth2AuthorizationService.ACCESS_TOKEN), tokenStore.deletedTokenTypes);
+        assertEquals("at-new", ((OAuth2AccessToken) tokenStore.storedAccessToken).getTokenValue());
+        assertEquals("at-new", service.getAccessToken(storeId));
+        assertEquals(1, http.calls);
+    }
+
+    private static OAuth2AuthorizationResponse tokenResponse(String accessToken, String refreshToken) throws Exception {
+        return new ObjectMapper().readValue(
+                "{\"access_token\":\"" + accessToken + "\",\"refresh_token\":\"" + refreshToken
+                        + "\",\"expires_in\":2592000,\"token_type\":\"bearer\"}",
+                OAuth2AuthorizationResponse.class);
+    }
+
     private static class FakeOAuth2CredentialStore implements OAuth2CredentialStore {
 
         private final OAuth2Secrets secrets;
@@ -279,17 +312,27 @@ class ConfigurableOAuth2AuthorizationServiceTest {
 
     private static class FakeOAuth2TokenStore implements OAuth2TokenStore {
 
-        private final OAuth2RefreshToken refreshToken;
+        private OAuth2AccessToken accessToken;
+        private OAuth2RefreshToken refreshToken;
         private Object storedAccessToken;
         private Object storedRefreshToken;
+        private final List<String> deletedTokenTypes = new ArrayList<>();
 
         FakeOAuth2TokenStore(OAuth2RefreshToken refreshToken) {
+            this(null, refreshToken);
+        }
+
+        FakeOAuth2TokenStore(OAuth2AccessToken accessToken, OAuth2RefreshToken refreshToken) {
+            this.accessToken = accessToken;
             this.refreshToken = refreshToken;
         }
 
         @Override
         @SuppressWarnings("unchecked")
         public <T> Optional<T> getToken(String key, String tokenName, String tokenType, Class<T> clazz) {
+            if (ConfigurableOAuth2AuthorizationService.ACCESS_TOKEN.equals(tokenType) && accessToken != null) {
+                return Optional.of((T) accessToken);
+            }
             if (ConfigurableOAuth2AuthorizationService.REFRESH_TOKEN.equals(tokenType) && refreshToken != null) {
                 return Optional.of((T) refreshToken);
             }
@@ -300,9 +343,43 @@ class ConfigurableOAuth2AuthorizationServiceTest {
         public void storeToken(String key, String tokenName, String tokenType, Object token) {
             if (ConfigurableOAuth2AuthorizationService.ACCESS_TOKEN.equals(tokenType)) {
                 storedAccessToken = token;
+                accessToken = (OAuth2AccessToken) token;
             } else if (ConfigurableOAuth2AuthorizationService.REFRESH_TOKEN.equals(tokenType)) {
                 storedRefreshToken = token;
+                refreshToken = (OAuth2RefreshToken) token;
             }
+        }
+
+        @Override
+        public void deleteToken(String key, String tokenName, String tokenType) {
+            deletedTokenTypes.add(tokenType);
+            if (ConfigurableOAuth2AuthorizationService.ACCESS_TOKEN.equals(tokenType)) {
+                accessToken = null;
+            } else if (ConfigurableOAuth2AuthorizationService.REFRESH_TOKEN.equals(tokenType)) {
+                refreshToken = null;
+            }
+        }
+    }
+
+    /** Each call to sendAndParse consumes the next element: an HttpClientException is thrown, anything else returned. */
+    private static class SequenceJsonHttpClient extends JsonHttpClient {
+
+        private final java.util.Deque<Object> outcomes;
+        private int calls;
+
+        SequenceJsonHttpClient(Object... outcomes) {
+            this.outcomes = new java.util.ArrayDeque<>(List.of(outcomes));
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        <T> T sendAndParse(HttpRequest request, Class<T> responseType) {
+            calls++;
+            Object next = outcomes.removeFirst();
+            if (next instanceof HttpClientException e) {
+                throw e;
+            }
+            return (T) next;
         }
     }
 

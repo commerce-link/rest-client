@@ -4,6 +4,7 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -12,7 +13,12 @@ import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class ConfigurableOAuth2AuthorizationService {
+
+    private static final Logger log = LoggerFactory.getLogger(ConfigurableOAuth2AuthorizationService.class);
 
     public static final String ACCESS_TOKEN = "access_token";
     public static final String REFRESH_TOKEN = "refresh_token";
@@ -20,6 +26,7 @@ public class ConfigurableOAuth2AuthorizationService {
     private final OAuth2CredentialStore credentialStore;
     private final OAuth2TokenStore tokenStore;
     private final JsonHttpClient httpClient;
+    private final Clock clock;
     private final String tokenName;
     private final String authorizationEndpoint;
     private final String refreshTokenEndpoint;
@@ -34,7 +41,7 @@ public class ConfigurableOAuth2AuthorizationService {
             String refreshTokenEndpoint,
             long refreshTokenExpirationInSeconds,
             Consumer<String> connectionLostHandler) {
-        this(credentialStore, tokenStore, new JsonHttpClient(), tokenName, authorizationEndpoint,
+        this(credentialStore, tokenStore, new JsonHttpClient(), Clock.systemUTC(), tokenName, authorizationEndpoint,
                 refreshTokenEndpoint, refreshTokenExpirationInSeconds, connectionLostHandler);
     }
 
@@ -47,9 +54,24 @@ public class ConfigurableOAuth2AuthorizationService {
             String refreshTokenEndpoint,
             long refreshTokenExpirationInSeconds,
             Consumer<String> connectionLostHandler) {
+        this(credentialStore, tokenStore, httpClient, Clock.systemUTC(), tokenName, authorizationEndpoint,
+                refreshTokenEndpoint, refreshTokenExpirationInSeconds, connectionLostHandler);
+    }
+
+    ConfigurableOAuth2AuthorizationService(
+            OAuth2CredentialStore credentialStore,
+            OAuth2TokenStore tokenStore,
+            JsonHttpClient httpClient,
+            Clock clock,
+            String tokenName,
+            String authorizationEndpoint,
+            String refreshTokenEndpoint,
+            long refreshTokenExpirationInSeconds,
+            Consumer<String> connectionLostHandler) {
         this.credentialStore = credentialStore;
         this.tokenStore = tokenStore;
         this.httpClient = httpClient;
+        this.clock = clock;
         this.tokenName = tokenName;
         this.authorizationEndpoint = authorizationEndpoint;
         this.refreshTokenEndpoint = refreshTokenEndpoint;
@@ -82,6 +104,17 @@ public class ConfigurableOAuth2AuthorizationService {
         }
 
         return op.get().getTokenValue();
+    }
+
+    /**
+     * Called after the API answered 401: the cached access token is treated as revoked regardless of its
+     * local expiry, evicted, and a new one is obtained through the regular refresh / authorize path.
+     * Returns null when no new token could be obtained.
+     */
+    public synchronized String renewAccessToken(String storeId) {
+        log.warn("Access token for {} rejected by the API, renewing (store={})", tokenName, storeId);
+        tokenStore.deleteToken(storeId, tokenName, ACCESS_TOKEN);
+        return refreshAccessToken(storeId);
     }
 
     private String refreshAccessToken(String storeId) {
