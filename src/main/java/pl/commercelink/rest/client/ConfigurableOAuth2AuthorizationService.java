@@ -5,11 +5,13 @@ import java.net.URLEncoder;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -22,6 +24,10 @@ public class ConfigurableOAuth2AuthorizationService {
 
     public static final String ACCESS_TOKEN = "access_token";
     public static final String REFRESH_TOKEN = "refresh_token";
+
+    static final Duration RENEWAL_COOLDOWN = Duration.ofSeconds(60);
+
+    private final Map<String, Instant> lastRenewalByStore = new ConcurrentHashMap<>();
 
     private final OAuth2CredentialStore credentialStore;
     private final OAuth2TokenStore tokenStore;
@@ -112,6 +118,14 @@ public class ConfigurableOAuth2AuthorizationService {
      * Returns null when no new token could be obtained.
      */
     public synchronized String renewAccessToken(String storeId) {
+        Instant now = clock.instant();
+        Instant last = lastRenewalByStore.get(storeId);
+        if (last != null && Duration.between(last, now).compareTo(RENEWAL_COOLDOWN) < 0) {
+            // another call renewed the token a moment ago (or the account is genuinely broken):
+            // hand out whatever the cache holds instead of hammering the token endpoint
+            return getAccessToken(storeId);
+        }
+        lastRenewalByStore.put(storeId, now);
         log.warn("Access token for {} rejected by the API, renewing (store={})", tokenName, storeId);
         tokenStore.deleteToken(storeId, tokenName, ACCESS_TOKEN);
         return refreshAccessToken(storeId);

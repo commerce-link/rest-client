@@ -286,6 +286,42 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     }
 
     @Test
+    void renewAccessTokenWithinCooldownReturnsCachedTokenWithoutCallingTheTokenEndpoint() throws Exception {
+        // given
+        String storeId = "store-1";
+        Instant start = Instant.parse("2026-09-02T12:00:00Z");
+        java.util.concurrent.atomic.AtomicReference<Instant> now = new java.util.concurrent.atomic.AtomicReference<>(start);
+        Clock clock = new Clock() {
+            @Override public java.time.ZoneId getZone() { return java.time.ZoneOffset.UTC; }
+            @Override public Clock withZone(java.time.ZoneId zone) { return this; }
+            @Override public Instant instant() { return now.get(); }
+        };
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", start, start.plusSeconds(2_592_000)),
+                new OAuth2RefreshToken("rt-old", start, start.plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                tokenResponse("at-new", "rt-new"), tokenResponse("at-newer", "rt-newer"));
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret")),
+                tokenStore, http, clock,
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, storeIdArg -> { });
+
+        // when: first 401 renews, a second 401 ten seconds later must not hit the token endpoint again
+        String first = service.renewAccessToken(storeId);
+        now.set(start.plusSeconds(10));
+        String second = service.renewAccessToken(storeId);
+        now.set(start.plusSeconds(61));
+        String third = service.renewAccessToken(storeId);
+
+        // then
+        assertEquals("at-new", first);
+        assertEquals("at-new", second);
+        assertEquals("at-newer", third);
+        assertEquals(2, http.calls);
+    }
+
+    @Test
     void rejectedRefreshTokenFallsBackToPasswordGrantWhenUsernameIsConfigured() throws Exception {
         // given: Furgonetka revoked the whole session, so the refresh grant fails with invalid_grant
         String storeId = "store-1";
