@@ -128,14 +128,8 @@ public class ConfigurableOAuth2AuthorizationService {
 
     private synchronized String authorize(String storeId) {
         OAuth2Secrets secrets = credentialStore.getSecrets(storeId, tokenName);
-        Map<String, String> params = getAuthorizationRequestParams(secrets);
-        String authHeader = createBasicAuthHeader(secrets);
-
         try {
-            OAuth2AuthorizationResponse authResponse = postFormEncoded(
-                    authorizationEndpoint, params, authHeader);
-            storeCredentials(storeId, authResponse);
-            return authResponse.getAccessToken();
+            return requestPasswordGrant(storeId, secrets);
         } catch (HttpClientException e) {
             if (isAuthorizationLost(e.getStatusCode(), secrets.getUsername() != null)) {
                 connectionLostHandler.accept(storeId);
@@ -167,11 +161,26 @@ public class ConfigurableOAuth2AuthorizationService {
                 log.warn("Refresh token for {} rejected, re-authorizing with the password grant (store={})",
                         tokenName, storeId);
                 tokenStore.deleteToken(storeId, tokenName, REFRESH_TOKEN);
-                return authorize(storeId);
+                try {
+                    return requestPasswordGrant(storeId, secrets);
+                } catch (HttpClientException fallbackFailure) {
+                    // the refresh token was rejected and the password grant failed too: the account is unusable
+                    connectionLostHandler.accept(storeId);
+                    return null;
+                }
             }
             connectionLostHandler.accept(storeId);
             return null;
         }
+    }
+
+    /** Password grant against the authorization endpoint; stores the tokens and returns the access token. */
+    private String requestPasswordGrant(String storeId, OAuth2Secrets secrets) {
+        Map<String, String> params = getAuthorizationRequestParams(secrets);
+        String authHeader = createBasicAuthHeader(secrets);
+        OAuth2AuthorizationResponse authResponse = postFormEncoded(authorizationEndpoint, params, authHeader);
+        storeCredentials(storeId, authResponse);
+        return authResponse.getAccessToken();
     }
 
     private OAuth2AuthorizationResponse postFormEncoded(String url, Map<String, String> params, String authHeader) {
