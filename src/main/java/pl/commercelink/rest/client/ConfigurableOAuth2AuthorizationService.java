@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -27,7 +28,11 @@ public class ConfigurableOAuth2AuthorizationService {
 
     static final Duration RENEWAL_COOLDOWN = Duration.ofSeconds(60);
 
-    private final Map<String, Instant> lastRenewalByStore = new ConcurrentHashMap<>();
+    /**
+     * Last renewal per store and token name. Static on purpose: consumers build a new service instance for
+     * every provider call, so an instance field would never throttle anything.
+     */
+    private static final Map<String, Instant> LAST_RENEWAL = new ConcurrentHashMap<>();
 
     private final OAuth2CredentialStore credentialStore;
     private final OAuth2TokenStore tokenStore;
@@ -119,13 +124,19 @@ public class ConfigurableOAuth2AuthorizationService {
      */
     public synchronized String renewAccessToken(String storeId) {
         Instant now = clock.instant();
-        Instant last = lastRenewalByStore.get(storeId);
-        if (last != null && Duration.between(last, now).compareTo(RENEWAL_COOLDOWN) < 0) {
+        AtomicBoolean renewalWon = new AtomicBoolean();
+        LAST_RENEWAL.compute(storeId + "|" + tokenName, (key, last) -> {
+            if (last != null && Duration.between(last, now).compareTo(RENEWAL_COOLDOWN) < 0) {
+                return last;
+            }
+            renewalWon.set(true);
+            return now;
+        });
+        if (!renewalWon.get()) {
             // another call renewed the token a moment ago (or the account is genuinely broken):
             // hand out whatever the cache holds instead of hammering the token endpoint
             return getAccessToken(storeId);
         }
-        lastRenewalByStore.put(storeId, now);
         log.warn("Access token for {} rejected by the API, renewing (store={})", tokenName, storeId);
         tokenStore.deleteToken(storeId, tokenName, ACCESS_TOKEN);
         return refreshAccessToken(storeId);

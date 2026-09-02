@@ -7,10 +7,13 @@ public class RestApiWithRetry {
 
     private final RestApi restApi;
 
-    // kept for the legacy constructor and future eager token bootstrap
+    /** Current (possibly cached) token: tried after a 401 before paying for a renewal. */
     private final Supplier<String> accessTokenSupplier;
 
     private final Supplier<String> accessTokenRenewer;
+
+    /** Last token handed to {@link RestApi#setBearerToken}; null until the first 401. */
+    private String bearerToken;
 
     /** Legacy wiring: the same supplier answers both the initial token and the retry after 401. */
     public RestApiWithRetry(RestApi restApi, Supplier<String> accessTokenSupplier) {
@@ -55,13 +58,32 @@ public class RestApiWithRetry {
             if (e.getStatusCode() != 401) {
                 throw e;
             }
+            HttpClientException rejected = e;
+            String cached = accessTokenSupplier.get();
+            if (cached != null && !cached.equals(bearerToken)) {
+                // lazy bootstrap, or another caller already renewed: try the cached token before renewing
+                applyToken(cached);
+                try {
+                    return apiCall.execute();
+                } catch (HttpClientException cachedTokenFailure) {
+                    if (cachedTokenFailure.getStatusCode() != 401) {
+                        throw cachedTokenFailure;
+                    }
+                    rejected = cachedTokenFailure;
+                }
+            }
             String renewed = accessTokenRenewer.get();
             if (renewed == null) {
-                throw e;
+                throw rejected;
             }
-            restApi.setBearerToken(renewed);
+            applyToken(renewed);
             return apiCall.execute();
         }
+    }
+
+    private void applyToken(String token) {
+        bearerToken = token;
+        restApi.setBearerToken(token);
     }
 
     private interface ApiCall<T> {
