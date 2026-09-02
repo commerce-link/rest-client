@@ -285,6 +285,83 @@ class ConfigurableOAuth2AuthorizationServiceTest {
         assertEquals(1, http.calls);
     }
 
+    @Test
+    void rejectedRefreshTokenFallsBackToPasswordGrantWhenUsernameIsConfigured() throws Exception {
+        // given: Furgonetka revoked the whole session, so the refresh grant fails with invalid_grant
+        String storeId = "store-1";
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", Instant.now(), Instant.now().plusSeconds(2_592_000)),
+                new OAuth2RefreshToken("rt-revoked", Instant.now(), Instant.now().plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_grant\"}"),
+                tokenResponse("at-new", "rt-new"));
+        List<String> lostConnections = new ArrayList<>();
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret", "user@example.com", "secret")),
+                tokenStore, http, Clock.systemUTC(),
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, lostConnections::add);
+
+        // when
+        String renewed = service.renewAccessToken(storeId);
+
+        // then
+        assertEquals("at-new", renewed);
+        assertEquals(2, http.calls);
+        assertTrue(lostConnections.isEmpty());
+        assertEquals("rt-new", ((OAuth2RefreshToken) tokenStore.storedRefreshToken).getTokenValue());
+    }
+
+    @Test
+    void rejectedRefreshTokenWithoutUsernameStillMarksConnectionLost() {
+        // given: device-flow provider (Allegro) has no password to fall back to
+        String storeId = "store-1";
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", Instant.now(), Instant.now().plusSeconds(3600)),
+                new OAuth2RefreshToken("rt-revoked", Instant.now(), Instant.now().plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_grant\"}"));
+        List<String> lostConnections = new ArrayList<>();
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret")),
+                tokenStore, http, Clock.systemUTC(),
+                "allegro", "https://allegro.pl/auth/oauth/token", "https://allegro.pl/auth/oauth/token",
+                3600L, lostConnections::add);
+
+        // when
+        String renewed = service.renewAccessToken(storeId);
+
+        // then
+        assertNull(renewed);
+        assertEquals(List.of(storeId), lostConnections);
+        assertEquals(1, http.calls);
+    }
+
+    @Test
+    void passwordGrantFallbackThatIsForbiddenMarksConnectionLost() {
+        // given
+        String storeId = "store-1";
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", Instant.now(), Instant.now().plusSeconds(3600)),
+                new OAuth2RefreshToken("rt-revoked", Instant.now(), Instant.now().plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_grant\"}"),
+                new HttpClientException(403, "{\"error\":\"access_denied\"}"));
+        List<String> lostConnections = new ArrayList<>();
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret", "user@example.com", "bad")),
+                tokenStore, http, Clock.systemUTC(),
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, lostConnections::add);
+
+        // when
+        String renewed = service.renewAccessToken(storeId);
+
+        // then
+        assertNull(renewed);
+        assertEquals(List.of(storeId), lostConnections);
+    }
+
     private static OAuth2AuthorizationResponse tokenResponse(String accessToken, String refreshToken) throws Exception {
         return new ObjectMapper().readValue(
                 "{\"access_token\":\"" + accessToken + "\",\"refresh_token\":\"" + refreshToken

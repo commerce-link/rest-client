@@ -159,9 +159,17 @@ public class ConfigurableOAuth2AuthorizationService {
             storeCredentials(storeId, authResponse);
             return authResponse.getAccessToken();
         } catch (HttpClientException e) {
-            if (isRefreshTokenRejected(e)) {
-                connectionLostHandler.accept(storeId);
+            if (!isRefreshTokenRejected(e)) {
+                return null;
             }
+            if (secrets.getUsername() != null) {
+                // the refresh token was revoked together with the session, but a password grant can start a new one
+                log.warn("Refresh token for {} rejected, re-authorizing with the password grant (store={})",
+                        tokenName, storeId);
+                tokenStore.deleteToken(storeId, tokenName, REFRESH_TOKEN);
+                return authorize(storeId);
+            }
+            connectionLostHandler.accept(storeId);
             return null;
         }
     }
