@@ -25,11 +25,12 @@ api.setBearerToken("my-token");
 MyResponse response = api.fetch("/endpoint", MyResponse.class);
 
 // Automatic token handling on 401: the cached token is tried first, then renewed once
-RestApiWithRetry api = new RestApiWithRetry(
-        restApi,
+// authService: ConfigurableOAuth2AuthorizationService; storeId: your tenant key
+RestApiWithRetry retrying = new RestApiWithRetry(
+        api,
         () -> authService.getAccessToken(storeId),   // cached token (refreshes only when locally expired)
         () -> authService.renewAccessToken(storeId)); // after 401: treat the cached token as revoked and refresh
-MyResponse response = api.fetchWithAuthRetry("/endpoint", Map.of(), MyResponse.class);
+MyResponse renewedResponse = retrying.fetchWithAuthRetry("/endpoint", Map.of(), MyResponse.class);
 ```
 
 Renewal runs at most once per 60 s per store and token name, a window shared across all `ConfigurableOAuth2AuthorizationService` instances in the JVM. When the refresh token is rejected and the secrets contain a username, the service falls back to the password grant; a failed fallback with a 4xx status marks the connection lost.
