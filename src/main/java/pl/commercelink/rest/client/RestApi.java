@@ -105,13 +105,19 @@ public class RestApi {
     }
 
     private HttpRequest.Builder withContentType(HttpRequest.Builder builder, Map<String, String> headers) {
-        Map<String, String> effective = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-        effective.putAll(defaultHeaders);
-        effective.putAll(headers);
-        if (!effective.containsKey("Content-Type")) {
+        if (!mergeHeaders(headers).containsKey("Content-Type")) {
             builder.header("Content-Type", "application/json");
         }
         return builder;
+    }
+
+    // HttpRequest.Builder.header() appends, so defaults and per-request headers are merged first and
+    // every header is added exactly once; per-request values win, case-insensitively.
+    private Map<String, String> mergeHeaders(Map<String, String> headers) {
+        Map<String, String> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        merged.putAll(defaultHeaders);
+        merged.putAll(headers);
+        return merged;
     }
 
     public <T> T delete(String endpoint, Class<T> responseType) {
@@ -130,8 +136,6 @@ public class RestApi {
         return buildRequest(url, Map.of());
     }
 
-    // HttpRequest.Builder.header() appends, so defaults and per-request headers are merged first
-    // and every header is added exactly once; per-request values win.
     private HttpRequest.Builder buildRequest(String url, Map<String, String> headers) {
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
@@ -141,9 +145,7 @@ public class RestApi {
             builder.header("Authorization", "Bearer " + bearerToken);
         }
 
-        Map<String, String> effective = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-        effective.putAll(defaultHeaders);
-        effective.putAll(headers);
+        Map<String, String> effective = mergeHeaders(headers);
         if (!effective.containsKey("Accept")) {
             builder.header("Accept", "application/json");
         }

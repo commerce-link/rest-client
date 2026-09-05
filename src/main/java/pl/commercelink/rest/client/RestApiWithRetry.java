@@ -44,21 +44,17 @@ public class RestApiWithRetry {
         return executeWithAuthRetry(() -> restApi.delete(endpoint, responseType));
     }
 
-    private <T> T executeWithAuthRetry(ApiCall<T> apiCall) {
+    private <T> T executeWithAuthRetry(Supplier<T> call) {
         try {
-            return apiCall.execute();
+            return call.get();
         } catch (HttpClientException e) {
             if (e.getStatusCode() == 401) {
                 restApi.setBearerToken(accessTokenSupplier.get());
-                return apiCall.execute();
+                return call.get();
             } else {
                 throw e;
             }
         }
-    }
-
-    private interface ApiCall<T> {
-        T execute();
     }
 
 }
