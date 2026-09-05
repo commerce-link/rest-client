@@ -111,8 +111,7 @@ public class RestApi {
         return builder;
     }
 
-    // HttpRequest.Builder.header() appends, so defaults and per-request headers are merged first and
-    // every header is added exactly once; per-request values win, case-insensitively.
+    // Per-request headers win over defaults, case-insensitively.
     private Map<String, String> mergeHeaders(Map<String, String> headers) {
         Map<String, String> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         merged.putAll(defaultHeaders);
@@ -136,6 +135,7 @@ public class RestApi {
         return buildRequest(url, Map.of());
     }
 
+    // HttpRequest.Builder.header() appends, so the merged map is added once, one header per entry.
     private HttpRequest.Builder buildRequest(String url, Map<String, String> headers) {
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
