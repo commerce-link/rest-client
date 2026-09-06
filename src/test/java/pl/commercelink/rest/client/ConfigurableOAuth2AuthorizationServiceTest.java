@@ -4,10 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.net.http.HttpRequest;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -46,7 +48,8 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     @Test
     void refreshWith400InvalidGrantMarksConnectionLost() {
         // given
-        String storeId = "store-1";
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
         FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
                 new OAuth2Secrets("client-id", "client-secret"));
         FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
@@ -76,7 +79,8 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     @Test
     void refreshWithOther400DoesNotMarkConnectionLost() {
         // given
-        String storeId = "store-1";
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
         FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
                 new OAuth2Secrets("client-id", "client-secret"));
         FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
@@ -106,7 +110,8 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     @Test
     void refreshWith403MarksConnectionLost() {
         // given
-        String storeId = "store-1";
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
         FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
                 new OAuth2Secrets("client-id", "client-secret"));
         FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
@@ -136,7 +141,8 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     @Test
     void authorizeWith400WithoutUsernameMarksConnectionLost() {
         // given
-        String storeId = "store-1";
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
         FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
                 new OAuth2Secrets("client-id", "client-secret"));
         FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(null);
@@ -165,7 +171,8 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     @Test
     void authorizeWith400WithUsernameDoesNotMarkConnectionLost() {
         // given
-        String storeId = "store-1";
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
         FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
                 new OAuth2Secrets("client-id", "client-secret", "username", "password"));
         FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(null);
@@ -194,7 +201,8 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     @Test
     void authorizeWith403WithUsernameMarksConnectionLost() {
         // given
-        String storeId = "store-1";
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
         FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
                 new OAuth2Secrets("client-id", "client-secret", "username", "password"));
         FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(null);
@@ -223,7 +231,8 @@ class ConfigurableOAuth2AuthorizationServiceTest {
     @Test
     void successfulRefreshPersistsRotatedTokens() throws Exception {
         // given
-        String storeId = "store-1";
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
         long refreshTokenExpirationInSeconds = 3600L;
         FakeOAuth2CredentialStore credentialStore = new FakeOAuth2CredentialStore(
                 new OAuth2Secrets("client-id", "client-secret"));
@@ -259,6 +268,327 @@ class ConfigurableOAuth2AuthorizationServiceTest {
                 storedRefreshToken.getExpiresAt().toEpochMilli() - storedRefreshToken.getIssuedAt().toEpochMilli());
     }
 
+    @Test
+    void renewAccessTokenRefreshesEvenWhenTheCachedTokenIsNotExpired() throws Exception {
+        // given: cached access token still valid for 30 days according to the local clock
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", Instant.now(), Instant.now().plusSeconds(2_592_000)),
+                new OAuth2RefreshToken("rt-old", Instant.now(), Instant.now().plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(tokenResponse("at-new", "rt-new"));
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret")),
+                tokenStore, http, Clock.systemUTC(),
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, storeIdArg -> { });
+
+        // when
+        String renewed = service.renewAccessToken(storeId);
+
+        // then: the cache is replaced, never emptied, so concurrent callers keep seeing a usable token
+        assertEquals("at-new", renewed);
+        assertTrue(tokenStore.deletedTokenTypes.isEmpty());
+        assertEquals("at-new", ((OAuth2AccessToken) tokenStore.storedAccessToken).getTokenValue());
+        assertEquals("at-new", service.getAccessToken(storeId));
+        assertEquals(1, http.calls);
+    }
+
+    @Test
+    void renewalCooldownLoserNeverCallsTheTokenEndpointEvenWithAnEmptyCache() throws Exception {
+        // given: two service instances over the same store, and a cache that goes empty behind their back
+        String storeId = "store-" + UUID.randomUUID();
+        Instant start = Instant.parse("2026-09-02T12:00:00Z");
+        MutableClock clock = new MutableClock(start);
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", start, start.plusSeconds(2_592_000)),
+                new OAuth2RefreshToken("rt-old", start, start.plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(tokenResponse("at-new", "rt-new"));
+        ConfigurableOAuth2AuthorizationService instanceA = furgonetkaService(tokenStore, http, clock);
+        ConfigurableOAuth2AuthorizationService instanceB = furgonetkaService(tokenStore, http, clock);
+
+        // when
+        String first = instanceA.renewAccessToken(storeId);
+        tokenStore.deleteToken(storeId, "furgonetka", ConfigurableOAuth2AuthorizationService.ACCESS_TOKEN);
+        clock.set(start.plusSeconds(5));
+        String second = instanceB.renewAccessToken(storeId);
+
+        // then: the loser gives up instead of spending the (already rotated) refresh token
+        assertEquals("at-new", first);
+        assertNull(second);
+        assertEquals(1, http.calls);
+    }
+
+    @Test
+    void renewAccessTokenWithinCooldownReturnsCachedTokenWithoutCallingTheTokenEndpoint() throws Exception {
+        // given
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
+        Instant start = Instant.parse("2026-09-02T12:00:00Z");
+        MutableClock clock = new MutableClock(start);
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", start, start.plusSeconds(2_592_000)),
+                new OAuth2RefreshToken("rt-old", start, start.plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                tokenResponse("at-new", "rt-new"), tokenResponse("at-newer", "rt-newer"));
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret")),
+                tokenStore, http, clock,
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, storeIdArg -> { });
+
+        // when: first 401 renews, a second 401 ten seconds later must not hit the token endpoint again
+        String first = service.renewAccessToken(storeId);
+        clock.set(start.plusSeconds(10));
+        String second = service.renewAccessToken(storeId);
+        clock.set(start.plusSeconds(61));
+        String third = service.renewAccessToken(storeId);
+
+        // then
+        assertEquals("at-new", first);
+        assertEquals("at-new", second);
+        assertEquals("at-newer", third);
+        assertEquals(2, http.calls);
+    }
+
+    @Test
+    void renewalCooldownIsSharedBetweenServiceInstancesForTheSameStoreAndToken() throws Exception {
+        // given: the app builds a new authorization service for every provider call
+        String storeId = "store-" + UUID.randomUUID();
+        Instant start = Instant.parse("2026-09-02T12:00:00Z");
+        MutableClock clock = new MutableClock(start);
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", start, start.plusSeconds(2_592_000)),
+                new OAuth2RefreshToken("rt-old", start, start.plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                tokenResponse("at-new", "rt-new"), tokenResponse("at-newer", "rt-newer"));
+        ConfigurableOAuth2AuthorizationService instanceA = furgonetkaService(tokenStore, http, clock);
+        ConfigurableOAuth2AuthorizationService instanceB = furgonetkaService(tokenStore, http, clock);
+
+        // when
+        String first = instanceA.renewAccessToken(storeId);
+        clock.set(start.plusSeconds(10));
+        String second = instanceB.renewAccessToken(storeId);
+        clock.set(start.plusSeconds(61));
+        String third = instanceB.renewAccessToken(storeId);
+
+        // then: the second renewal is throttled even though it runs on a different instance
+        assertEquals("at-new", first);
+        assertEquals("at-new", second);
+        assertEquals("at-newer", third);
+        assertEquals(2, http.calls);
+    }
+
+    @Test
+    void renewalCooldownIsPerStoreAndTokenName() throws Exception {
+        // given
+        String firstStoreId = "store-" + UUID.randomUUID();
+        String secondStoreId = "store-" + UUID.randomUUID();
+        Instant start = Instant.parse("2026-09-02T12:00:00Z");
+        MutableClock clock = new MutableClock(start);
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", start, start.plusSeconds(2_592_000)),
+                new OAuth2RefreshToken("rt-old", start, start.plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                tokenResponse("at-1", "rt-1"), tokenResponse("at-2", "rt-2"), tokenResponse("at-3", "rt-3"));
+        ConfigurableOAuth2AuthorizationService furgonetka = furgonetkaService(tokenStore, http, clock);
+        ConfigurableOAuth2AuthorizationService allegro = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret")),
+                tokenStore, http, clock,
+                "allegro", "https://allegro.pl/auth/oauth/token", "https://allegro.pl/auth/oauth/token",
+                3600L, storeIdArg -> { });
+
+        // when: three renewals within the same minute, each for a different store/token pair
+        String firstStoreToken = furgonetka.renewAccessToken(firstStoreId);
+        String secondStoreToken = furgonetka.renewAccessToken(secondStoreId);
+        String otherTokenName = allegro.renewAccessToken(firstStoreId);
+
+        // then: the cooldown of one pair never throttles another
+        assertEquals("at-1", firstStoreToken);
+        assertEquals("at-2", secondStoreToken);
+        assertEquals("at-3", otherTokenName);
+        assertEquals(3, http.calls);
+    }
+
+    private static ConfigurableOAuth2AuthorizationService furgonetkaService(
+            OAuth2TokenStore tokenStore, JsonHttpClient httpClient, Clock clock) {
+        return new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret")),
+                tokenStore, httpClient, clock,
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, storeIdArg -> { });
+    }
+
+    @Test
+    void rejectedRefreshTokenFallsBackToPasswordGrantWhenUsernameIsConfigured() throws Exception {
+        // given: Furgonetka revoked the whole session, so the refresh grant fails with invalid_grant
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", Instant.now(), Instant.now().plusSeconds(2_592_000)),
+                new OAuth2RefreshToken("rt-revoked", Instant.now(), Instant.now().plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_grant\"}"),
+                tokenResponse("at-new", "rt-new"));
+        List<String> lostConnections = new ArrayList<>();
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret", "user@example.com", "secret")),
+                tokenStore, http, Clock.systemUTC(),
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, lostConnections::add);
+
+        // when
+        String renewed = service.renewAccessToken(storeId);
+
+        // then
+        assertEquals("at-new", renewed);
+        assertEquals(2, http.calls);
+        assertTrue(lostConnections.isEmpty());
+        assertEquals("rt-new", ((OAuth2RefreshToken) tokenStore.storedRefreshToken).getTokenValue());
+    }
+
+    @Test
+    void rejectedRefreshTokenWithoutUsernameStillMarksConnectionLost() {
+        // given: device-flow provider (Allegro) has no password to fall back to
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", Instant.now(), Instant.now().plusSeconds(3600)),
+                new OAuth2RefreshToken("rt-revoked", Instant.now(), Instant.now().plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_grant\"}"));
+        List<String> lostConnections = new ArrayList<>();
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret")),
+                tokenStore, http, Clock.systemUTC(),
+                "allegro", "https://allegro.pl/auth/oauth/token", "https://allegro.pl/auth/oauth/token",
+                3600L, lostConnections::add);
+
+        // when
+        String renewed = service.renewAccessToken(storeId);
+
+        // then
+        assertNull(renewed);
+        assertEquals(List.of(storeId), lostConnections);
+        assertEquals(1, http.calls);
+    }
+
+    @Test
+    void passwordGrantFallbackThatIsForbiddenMarksConnectionLost() {
+        // given
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", Instant.now(), Instant.now().plusSeconds(3600)),
+                new OAuth2RefreshToken("rt-revoked", Instant.now(), Instant.now().plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_grant\"}"),
+                new HttpClientException(403, "{\"error\":\"access_denied\"}"));
+        List<String> lostConnections = new ArrayList<>();
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret", "user@example.com", "bad")),
+                tokenStore, http, Clock.systemUTC(),
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, lostConnections::add);
+
+        // when
+        String renewed = service.renewAccessToken(storeId);
+
+        // then
+        assertNull(renewed);
+        assertEquals(List.of(storeId), lostConnections);
+    }
+
+    @Test
+    void passwordGrantFallbackRejectedWithInvalidGrantMarksConnectionLost() {
+        // given: the store's password changed at the provider, so both grants are rejected
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", Instant.now(), Instant.now().plusSeconds(3600)),
+                new OAuth2RefreshToken("rt-revoked", Instant.now(), Instant.now().plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_grant\"}"),
+                new HttpClientException(400, "{\"error\":\"invalid_grant\"}"));
+        List<String> lostConnections = new ArrayList<>();
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret", "user@example.com", "old-password")),
+                tokenStore, http, Clock.systemUTC(),
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, lostConnections::add);
+
+        // when
+        String renewed = service.renewAccessToken(storeId);
+
+        // then
+        assertNull(renewed);
+        assertEquals(List.of(storeId), lostConnections);
+        assertEquals(2, http.calls);
+    }
+
+    @Test
+    void passwordGrantFallbackFailingWithServerErrorDoesNotMarkConnectionLost() {
+        // given: the refresh token was rejected and the token endpoint is then down
+        // unique per test: the renewal cooldown is shared static state
+        String storeId = "store-" + UUID.randomUUID();
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-revoked", Instant.now(), Instant.now().plusSeconds(3600)),
+                new OAuth2RefreshToken("rt-revoked", Instant.now(), Instant.now().plusSeconds(3600)));
+        SequenceJsonHttpClient http = new SequenceJsonHttpClient(
+                new HttpClientException(400, "{\"error\":\"invalid_grant\"}"),
+                new HttpClientException(503, "service unavailable"));
+        List<String> lostConnections = new ArrayList<>();
+        ConfigurableOAuth2AuthorizationService service = new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret", "user@example.com", "secret")),
+                tokenStore, http, Clock.systemUTC(),
+                "furgonetka", "https://api.furgonetka.pl/oauth/token", "https://api.furgonetka.pl/oauth/token",
+                3600L, lostConnections::add);
+
+        // when
+        String renewed = service.renewAccessToken(storeId);
+
+        // then: an outage must not look like a revoked account
+        assertNull(renewed);
+        assertTrue(lostConnections.isEmpty());
+        assertEquals(2, http.calls);
+    }
+
+    private static OAuth2AuthorizationResponse tokenResponse(String accessToken, String refreshToken) throws Exception {
+        return new ObjectMapper().readValue(
+                "{\"access_token\":\"" + accessToken + "\",\"refresh_token\":\"" + refreshToken
+                        + "\",\"expires_in\":2592000,\"token_type\":\"bearer\"}",
+                OAuth2AuthorizationResponse.class);
+    }
+
+    /** Test clock whose instant can be moved forward by hand. */
+    private static class MutableClock extends Clock {
+
+        private Instant now;
+
+        MutableClock(Instant now) {
+            this.now = now;
+        }
+
+        void set(Instant now) {
+            this.now = now;
+        }
+
+        @Override
+        public java.time.ZoneId getZone() {
+            return java.time.ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(java.time.ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
+    }
+
     private static class FakeOAuth2CredentialStore implements OAuth2CredentialStore {
 
         private final OAuth2Secrets secrets;
@@ -279,17 +609,27 @@ class ConfigurableOAuth2AuthorizationServiceTest {
 
     private static class FakeOAuth2TokenStore implements OAuth2TokenStore {
 
-        private final OAuth2RefreshToken refreshToken;
+        private OAuth2AccessToken accessToken;
+        private OAuth2RefreshToken refreshToken;
         private Object storedAccessToken;
         private Object storedRefreshToken;
+        private final List<String> deletedTokenTypes = new ArrayList<>();
 
         FakeOAuth2TokenStore(OAuth2RefreshToken refreshToken) {
+            this(null, refreshToken);
+        }
+
+        FakeOAuth2TokenStore(OAuth2AccessToken accessToken, OAuth2RefreshToken refreshToken) {
+            this.accessToken = accessToken;
             this.refreshToken = refreshToken;
         }
 
         @Override
         @SuppressWarnings("unchecked")
         public <T> Optional<T> getToken(String key, String tokenName, String tokenType, Class<T> clazz) {
+            if (ConfigurableOAuth2AuthorizationService.ACCESS_TOKEN.equals(tokenType) && accessToken != null) {
+                return Optional.of((T) accessToken);
+            }
             if (ConfigurableOAuth2AuthorizationService.REFRESH_TOKEN.equals(tokenType) && refreshToken != null) {
                 return Optional.of((T) refreshToken);
             }
@@ -300,9 +640,43 @@ class ConfigurableOAuth2AuthorizationServiceTest {
         public void storeToken(String key, String tokenName, String tokenType, Object token) {
             if (ConfigurableOAuth2AuthorizationService.ACCESS_TOKEN.equals(tokenType)) {
                 storedAccessToken = token;
+                accessToken = (OAuth2AccessToken) token;
             } else if (ConfigurableOAuth2AuthorizationService.REFRESH_TOKEN.equals(tokenType)) {
                 storedRefreshToken = token;
+                refreshToken = (OAuth2RefreshToken) token;
             }
+        }
+
+        @Override
+        public void deleteToken(String key, String tokenName, String tokenType) {
+            deletedTokenTypes.add(tokenType);
+            if (ConfigurableOAuth2AuthorizationService.ACCESS_TOKEN.equals(tokenType)) {
+                accessToken = null;
+            } else if (ConfigurableOAuth2AuthorizationService.REFRESH_TOKEN.equals(tokenType)) {
+                refreshToken = null;
+            }
+        }
+    }
+
+    /** Each call to sendAndParse consumes the next element: an HttpClientException is thrown, anything else returned. */
+    private static class SequenceJsonHttpClient extends JsonHttpClient {
+
+        private final java.util.Deque<Object> outcomes;
+        private int calls;
+
+        SequenceJsonHttpClient(Object... outcomes) {
+            this.outcomes = new java.util.ArrayDeque<>(List.of(outcomes));
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        <T> T sendAndParse(HttpRequest request, Class<T> responseType) {
+            calls++;
+            Object next = outcomes.removeFirst();
+            if (next instanceof HttpClientException e) {
+                throw e;
+            }
+            return (T) next;
         }
     }
 
