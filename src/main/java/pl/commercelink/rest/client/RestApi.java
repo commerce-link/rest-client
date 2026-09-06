@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 public class RestApi {
@@ -41,11 +42,13 @@ public class RestApi {
     }
 
     public <T> T fetch(String endpoint, Map<String, String> params, Class<T> responseType) {
-        HttpRequest request = buildRequest(buildUrl(endpoint, params))
-                .GET()
-                .build();
+        return fetch(endpoint, params, Map.of(), responseType);
+    }
 
-        return execute(request, responseType);
+    /** Headers given here override default headers with the same name for this request only. */
+    public <T> T fetch(String endpoint, Map<String, String> params, Map<String, String> headers,
+                       Class<T> responseType) {
+        return execute(buildGet(endpoint, params, headers), responseType);
     }
 
     public <T> List<T> fetchList(String endpoint, Map<String, String> params, TypeReference<List<T>> responseType) {
@@ -57,7 +60,12 @@ public class RestApi {
     }
 
     public <T> T post(String endpoint, Object body, Class<T> responseType) {
-        return execute(buildPost(endpoint, body), responseType);
+        return post(endpoint, body, Map.of(), responseType);
+    }
+
+    /** Headers given here override default headers with the same name for this request only. */
+    public <T> T post(String endpoint, Object body, Map<String, String> headers, Class<T> responseType) {
+        return execute(buildPost(endpoint, body, headers), responseType);
     }
 
     public <T> T put(String endpoint, Object body, Class<T> responseType) {
@@ -68,29 +76,47 @@ public class RestApi {
         return execute(buildPatch(endpoint, body), responseType);
     }
 
+    HttpRequest buildGet(String endpoint, Map<String, String> params, Map<String, String> headers) {
+        return buildRequest(buildUrl(endpoint, params), headers)
+                .GET()
+                .build();
+    }
+
     HttpRequest buildPost(String endpoint, Object body) {
-        return withContentType(buildRequest(baseUrl + endpoint)
-                .POST(httpClient.jsonBodyPublisher(body)))
+        return buildPost(endpoint, body, Map.of());
+    }
+
+    HttpRequest buildPost(String endpoint, Object body, Map<String, String> headers) {
+        return withContentType(buildRequest(baseUrl + endpoint, headers), headers)
+                .POST(httpClient.jsonBodyPublisher(body))
                 .build();
     }
 
     HttpRequest buildPut(String endpoint, Object body) {
-        return withContentType(buildRequest(baseUrl + endpoint)
-                .PUT(httpClient.jsonBodyPublisher(body)))
+        return withContentType(buildRequest(baseUrl + endpoint, Map.of()), Map.of())
+                .PUT(httpClient.jsonBodyPublisher(body))
                 .build();
     }
 
     HttpRequest buildPatch(String endpoint, Object body) {
-        return withContentType(buildRequest(baseUrl + endpoint)
-                .method("PATCH", httpClient.jsonBodyPublisher(body)))
+        return withContentType(buildRequest(baseUrl + endpoint, Map.of()), Map.of())
+                .method("PATCH", httpClient.jsonBodyPublisher(body))
                 .build();
     }
 
-    private HttpRequest.Builder withContentType(HttpRequest.Builder builder) {
-        if (!defaultHeaders.containsKey("Content-Type")) {
+    private HttpRequest.Builder withContentType(HttpRequest.Builder builder, Map<String, String> headers) {
+        if (!mergeHeaders(headers).containsKey("Content-Type")) {
             builder.header("Content-Type", "application/json");
         }
         return builder;
+    }
+
+    // Per-request headers win over defaults, case-insensitively.
+    private Map<String, String> mergeHeaders(Map<String, String> headers) {
+        Map<String, String> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        merged.putAll(defaultHeaders);
+        merged.putAll(headers);
+        return merged;
     }
 
     public <T> T delete(String endpoint, Class<T> responseType) {
@@ -106,6 +132,11 @@ public class RestApi {
     }
 
     private HttpRequest.Builder buildRequest(String url) {
+        return buildRequest(url, Map.of());
+    }
+
+    // HttpRequest.Builder.header() appends, so the merged map is added once, one header per entry.
+    private HttpRequest.Builder buildRequest(String url, Map<String, String> headers) {
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(requestTimeout);
@@ -114,11 +145,11 @@ public class RestApi {
             builder.header("Authorization", "Bearer " + bearerToken);
         }
 
-        if (!defaultHeaders.containsKey("Accept")) {
+        Map<String, String> effective = mergeHeaders(headers);
+        if (!effective.containsKey("Accept")) {
             builder.header("Accept", "application/json");
         }
-
-        for (Map.Entry<String, String> entry : defaultHeaders.entrySet()) {
+        for (Map.Entry<String, String> entry : effective.entrySet()) {
             builder.header(entry.getKey(), entry.getValue());
         }
 
