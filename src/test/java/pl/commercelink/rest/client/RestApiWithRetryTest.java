@@ -18,6 +18,8 @@ class RestApiWithRetryTest {
         String acceptedToken;
         private String currentToken;
         final List<String> tokensSet = new ArrayList<>();
+        /** Per-request headers forwarded by the 4-arg overloads, one entry per API call. */
+        final List<Map<String, String>> headersSeen = new ArrayList<>();
         int calls;
 
         FakeRestApi(String acceptedToken) {
@@ -39,6 +41,19 @@ class RestApiWithRetryTest {
                 throw new HttpClientException(401, "{\"code\":\"access_denied\",\"details\":\"Access token has been revoked\"}");
             }
             return (T) "ok";
+        }
+
+        @Override
+        public <T> T fetch(String endpoint, Map<String, String> params, Map<String, String> headers,
+                           Class<T> responseType) {
+            headersSeen.add(headers);
+            return fetch(endpoint, params, responseType);
+        }
+
+        @Override
+        public <T> T post(String endpoint, Object body, Map<String, String> headers, Class<T> responseType) {
+            headersSeen.add(headers);
+            return fetch(endpoint, Map.of(), responseType);
         }
     }
 
@@ -253,5 +268,83 @@ class RestApiWithRetryTest {
         assertEquals("ok", result);
         assertEquals(2, api.calls);
         assertEquals(List.of("at-new"), api.tokensSet);
+    }
+
+    /*
+     * The 4-arg fetch/post overloads: if either silently dropped the header map instead of forwarding it,
+     * every caller relying on a per-request header override (e.g. Allegro's customer-returns beta media type)
+     * would start getting HTTP 406 while every other module's tests stayed green.
+     */
+
+    private static final Map<String, String> BETA = Map.of("Accept", "application/vnd.allegro.beta.v1+json");
+
+    @Test
+    void fetchWithAuthRetryPassesPerRequestHeadersThrough() {
+        // given
+        FakeRestApi api = new FakeRestApi("at-ok");
+        api.setBearerToken("at-ok");
+        RestApiWithRetry retry = new RestApiWithRetry(api, () -> "at-ok");
+
+        // when
+        String result = retry.fetchWithAuthRetry("/x", Map.of(), BETA, String.class);
+
+        // then
+        assertEquals("ok", result);
+        assertEquals(List.of(BETA), api.headersSeen);
+    }
+
+    @Test
+    void postWithAuthRetryPassesPerRequestHeadersThrough() {
+        // given
+        FakeRestApi api = new FakeRestApi("at-ok");
+        api.setBearerToken("at-ok");
+        RestApiWithRetry retry = new RestApiWithRetry(api, () -> "at-ok");
+
+        // when
+        String result = retry.postWithAuthRetry("/x", new Object(), BETA, String.class);
+
+        // then
+        assertEquals("ok", result);
+        assertEquals(List.of(BETA), api.headersSeen);
+    }
+
+    @Test
+    void fetchWithAuthRetryRenewsTheTokenAndKeepsTheHeadersOnRetry() {
+        // given: the cached token is revoked, the renewer obtains a fresh one
+        FakeRestApi api = new FakeRestApi("at-new");
+        AtomicInteger renewals = new AtomicInteger();
+        RestApiWithRetry retry = new RestApiWithRetry(api, () -> "at-revoked", () -> {
+            renewals.incrementAndGet();
+            return "at-new";
+        });
+
+        // when
+        String result = retry.fetchWithAuthRetry("/x", Map.of(), BETA, String.class);
+
+        // then: every attempt (initial, cached-token retry, renewed-token retry) forwards the same headers
+        assertEquals("ok", result);
+        assertEquals(1, renewals.get());
+        assertEquals(List.of(BETA, BETA, BETA), api.headersSeen);
+        assertEquals(List.of("at-revoked", "at-new"), api.tokensSet);
+    }
+
+    @Test
+    void postWithAuthRetryRenewsTheTokenAndKeepsTheHeadersOnRetry() {
+        // given
+        FakeRestApi api = new FakeRestApi("at-new");
+        AtomicInteger renewals = new AtomicInteger();
+        RestApiWithRetry retry = new RestApiWithRetry(api, () -> "at-revoked", () -> {
+            renewals.incrementAndGet();
+            return "at-new";
+        });
+
+        // when
+        String result = retry.postWithAuthRetry("/x", new Object(), BETA, String.class);
+
+        // then
+        assertEquals("ok", result);
+        assertEquals(1, renewals.get());
+        assertEquals(List.of(BETA, BETA, BETA), api.headersSeen);
+        assertEquals(List.of("at-revoked", "at-new"), api.tokensSet);
     }
 }
