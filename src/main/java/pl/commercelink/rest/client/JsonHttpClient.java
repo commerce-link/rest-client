@@ -41,6 +41,21 @@ class JsonHttpClient {
         return response;
     }
 
+    BinaryResponse sendForBytes(HttpRequest request) {
+        HttpResponse<byte[]> response;
+        try {
+            response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+        } catch (Exception e) {
+            throw new RuntimeException("HTTP request failed", e);
+        }
+        if (response.statusCode() >= 400) {
+            throw new HttpClientException(response.statusCode(),
+                    new String(response.body(), java.nio.charset.StandardCharsets.UTF_8));
+        }
+        String contentType = response.headers().firstValue("Content-Type").orElse(null);
+        return new BinaryResponse(response.body(), contentType);
+    }
+
     <T> T sendAndParse(HttpRequest request, Class<T> responseType) {
         HttpResponse<String> response = sendAndCheckStatus(request);
         if (responseType == Void.class || responseType == void.class) {
