@@ -658,6 +658,104 @@ class ConfigurableOAuth2AuthorizationServiceTest {
         assertTrue(lostConnections.isEmpty());
     }
 
+    @Test
+    void concurrentRefreshesFromTwoServiceInstancesSpendTheRefreshTokenOnce() throws Exception {
+        // given: two service instances (the factories build one per call, e.g. a tracking poll and a marketplace
+        // import) find the same expired access token; the token endpoint rotates single-use refresh tokens
+        String storeId = "store-" + UUID.randomUUID();
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-expired", Instant.now().minusSeconds(7200), Instant.now().minusSeconds(3600)),
+                new OAuth2RefreshToken("rt-old", Instant.now(), Instant.now().plusSeconds(3600)));
+        SingleUseRefreshTokenHttpClient http = new SingleUseRefreshTokenHttpClient("rt-old",
+                tokenResponse("at-new", "rt-new"));
+        List<String> lostConnections = java.util.Collections.synchronizedList(new ArrayList<>());
+        ConfigurableOAuth2AuthorizationService first = allegroService(tokenStore, http, lostConnections);
+        ConfigurableOAuth2AuthorizationService second = allegroService(tokenStore, http, lostConnections);
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+
+        try {
+            // when: the first refresh is in flight at the token endpoint while the second caller arrives
+            java.util.concurrent.Future<String> firstToken = executor.submit(() -> first.getAccessToken(storeId));
+            assertTrue(http.firstCallInFlight.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            java.util.concurrent.atomic.AtomicReference<Thread> secondThread = new java.util.concurrent.atomic.AtomicReference<>();
+            java.util.concurrent.Future<String> secondToken = executor.submit(() -> {
+                secondThread.set(Thread.currentThread());
+                return second.getAccessToken(storeId);
+            });
+            awaitBlockedOrFinished(secondThread, secondToken);
+            http.releaseFirstCall.countDown();
+
+            // then: one token request, both callers get the rotated access token, the connection stays
+            assertEquals("at-new", firstToken.get(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals("at-new", secondToken.get(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals(1, http.calls.get());
+            assertTrue(lostConnections.isEmpty());
+        } finally {
+            http.releaseFirstCall.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void renewalWaitingForAConcurrentRefreshUsesTheRotatedPair() throws Exception {
+        // given: one instance refreshes an expired token while another instance renews after a 401
+        String storeId = "store-" + UUID.randomUUID();
+        FakeOAuth2TokenStore tokenStore = new FakeOAuth2TokenStore(
+                new OAuth2AccessToken("at-expired", Instant.now().minusSeconds(7200), Instant.now().minusSeconds(3600)),
+                new OAuth2RefreshToken("rt-old", Instant.now(), Instant.now().plusSeconds(3600)));
+        SingleUseRefreshTokenHttpClient http = new SingleUseRefreshTokenHttpClient("rt-old",
+                tokenResponse("at-new", "rt-new"));
+        List<String> lostConnections = java.util.Collections.synchronizedList(new ArrayList<>());
+        ConfigurableOAuth2AuthorizationService refreshing = allegroService(tokenStore, http, lostConnections);
+        ConfigurableOAuth2AuthorizationService renewing = allegroService(tokenStore, http, lostConnections);
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+
+        try {
+            // when
+            java.util.concurrent.Future<String> refreshed = executor.submit(() -> refreshing.getAccessToken(storeId));
+            assertTrue(http.firstCallInFlight.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            java.util.concurrent.atomic.AtomicReference<Thread> renewThread = new java.util.concurrent.atomic.AtomicReference<>();
+            java.util.concurrent.Future<String> renewed = executor.submit(() -> {
+                renewThread.set(Thread.currentThread());
+                return renewing.renewAccessToken(storeId);
+            });
+            awaitBlockedOrFinished(renewThread, renewed);
+            http.releaseFirstCall.countDown();
+
+            // then: the renewal takes the pair stored by the refresh instead of spending rt-old again
+            assertEquals("at-new", refreshed.get(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals("at-new", renewed.get(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals(1, http.calls.get());
+            assertTrue(lostConnections.isEmpty());
+        } finally {
+            http.releaseFirstCall.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    private static ConfigurableOAuth2AuthorizationService allegroService(
+            FakeOAuth2TokenStore tokenStore, JsonHttpClient http, List<String> lostConnections) {
+        return new ConfigurableOAuth2AuthorizationService(
+                new FakeOAuth2CredentialStore(new OAuth2Secrets("client-id", "client-secret")),
+                tokenStore, http, Clock.systemUTC(),
+                "allegro_marketplace", "https://allegro.pl/auth/oauth/token", "https://allegro.pl/auth/oauth/token",
+                3600L, lostConnections::add);
+    }
+
+    /** Waits until the thread is blocked on a monitor (waiting for the refresh lock) or its call has finished. */
+    private static void awaitBlockedOrFinished(java.util.concurrent.atomic.AtomicReference<Thread> thread,
+                                               java.util.concurrent.Future<?> call) {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            Thread t = thread.get();
+            if (call.isDone() || (t != null && t.getState() == Thread.State.BLOCKED)) {
+                return;
+            }
+            Thread.onSpinWait();
+        }
+        throw new AssertionError("the second caller neither blocked nor finished");
+    }
+
     private static OAuth2AuthorizationResponse tokenResponse(String accessToken, String refreshToken) throws Exception {
         return new ObjectMapper().readValue(
                 "{\"access_token\":\"" + accessToken + "\",\"refresh_token\":\"" + refreshToken
@@ -714,10 +812,10 @@ class ConfigurableOAuth2AuthorizationServiceTest {
 
     private static class FakeOAuth2TokenStore implements OAuth2TokenStore {
 
-        private OAuth2AccessToken accessToken;
-        private OAuth2RefreshToken refreshToken;
-        private Object storedAccessToken;
-        private Object storedRefreshToken;
+        private volatile OAuth2AccessToken accessToken;
+        private volatile OAuth2RefreshToken refreshToken;
+        private volatile Object storedAccessToken;
+        private volatile Object storedRefreshToken;
         private final List<String> deletedTokenTypes = new ArrayList<>();
 
         FakeOAuth2TokenStore(OAuth2RefreshToken refreshToken) {
@@ -819,6 +917,79 @@ class ConfigurableOAuth2AuthorizationServiceTest {
                 throw e;
             }
             return (T) next;
+        }
+    }
+
+    /**
+     * Token endpoint with single-use refresh tokens: the first call waits until the test releases it, so a second
+     * caller can arrive while it is in flight; a refresh token that is not the current one gets invalid_grant.
+     */
+    private static class SingleUseRefreshTokenHttpClient extends JsonHttpClient {
+
+        private final java.util.concurrent.CountDownLatch firstCallInFlight = new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.CountDownLatch releaseFirstCall = new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        private final OAuth2AuthorizationResponse rotated;
+        private volatile String validRefreshToken;
+
+        SingleUseRefreshTokenHttpClient(String validRefreshToken, OAuth2AuthorizationResponse rotated) {
+            this.validRefreshToken = validRefreshToken;
+            this.rotated = rotated;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        <T> T sendAndParse(HttpRequest request, Class<T> responseType) {
+            int call = calls.incrementAndGet();
+            String sentToken = sentRefreshToken(request);
+            if (call == 1) {
+                firstCallInFlight.countDown();
+                try {
+                    releaseFirstCall.await(5, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            synchronized (this) {
+                if (!sentToken.equals(validRefreshToken)) {
+                    throw new HttpClientException(400, "{\"error\":\"invalid_grant\"}");
+                }
+                validRefreshToken = rotated.getRefreshToken();
+                return (T) rotated;
+            }
+        }
+
+        private static String sentRefreshToken(HttpRequest request) {
+            java.util.concurrent.CompletableFuture<String> body = new java.util.concurrent.CompletableFuture<>();
+            request.bodyPublisher().orElseThrow().subscribe(new java.util.concurrent.Flow.Subscriber<>() {
+                private final StringBuilder text = new StringBuilder();
+
+                @Override
+                public void onSubscribe(java.util.concurrent.Flow.Subscription subscription) {
+                    subscription.request(Long.MAX_VALUE);
+                }
+
+                @Override
+                public void onNext(java.nio.ByteBuffer item) {
+                    text.append(java.nio.charset.StandardCharsets.UTF_8.decode(item));
+                }
+
+                @Override
+                public void onError(Throwable throwable) {
+                    body.completeExceptionally(throwable);
+                }
+
+                @Override
+                public void onComplete() {
+                    body.complete(text.toString());
+                }
+            });
+            String form = body.join();
+            return java.util.Arrays.stream(form.split("&"))
+                    .filter(pair -> pair.startsWith("refresh_token="))
+                    .map(pair -> pair.substring("refresh_token=".length()))
+                    .findFirst()
+                    .orElse("");
         }
     }
 

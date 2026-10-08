@@ -34,6 +34,13 @@ public class ConfigurableOAuth2AuthorizationService {
      */
     private static final Map<String, Instant> LAST_RENEWAL = new ConcurrentHashMap<>();
 
+    /**
+     * One lock per store and token name, shared by every instance of this class in the JVM: refresh tokens may be
+     * single-use (Allegro), so two refreshes with the same token would make the second one fail with invalid_grant.
+     * It does not serialize refreshes across processes; that case is handled by the re-read after invalid_grant.
+     */
+    private static final Map<String, Object> REFRESH_LOCKS = new ConcurrentHashMap<>();
+
     private final OAuth2CredentialStore credentialStore;
     private final OAuth2TokenStore tokenStore;
     private final JsonHttpClient httpClient;
@@ -111,7 +118,7 @@ public class ConfigurableOAuth2AuthorizationService {
                 storeId, tokenName, ACCESS_TOKEN, OAuth2AccessToken.class);
 
         if (!op.isPresent() || op.get().isExpired()) {
-            return refreshAccessToken(storeId);
+            return refreshAccessToken(storeId, getRefreshToken(storeId), false);
         }
 
         return op.get().getTokenValue();
@@ -148,19 +155,39 @@ public class ConfigurableOAuth2AuthorizationService {
         log.warn("Access token for {} rejected by the API, renewing (store={})", tokenName, storeId);
         // the cached access token is deliberately kept until the refresh succeeds and overwrites it:
         // evicting it first would let a concurrent caller spend the same (single-use) refresh token
-        return refreshAccessToken(storeId);
+        return refreshAccessToken(storeId, getRefreshToken(storeId), true);
     }
 
-    private String refreshAccessToken(String storeId) {
-        String refreshToken = getRefreshToken(storeId);
-        if (refreshToken == null) {
-            return authorize(storeId);
-        } else {
-            return authenticate(storeId, refreshToken);
+    /**
+     * Refreshes under the JVM-wide lock of this store and token name. Inside the lock the stored tokens are read
+     * again: a caller that waited for the lock usually finds the pair another caller has just stored, and uses it
+     * instead of spending a refresh token that is no longer valid.
+     *
+     * @param refreshTokenSeen   the refresh token the caller read before taking the lock (null when there was none)
+     * @param accessTokenRejected true when the API rejected the stored access token (401): a stored access token is
+     *                            then reused only if the refresh token was rotated meanwhile, since the unexpired
+     *                            one may be exactly the token the API has just refused
+     */
+    private String refreshAccessToken(String storeId, String refreshTokenSeen, boolean accessTokenRejected) {
+        synchronized (REFRESH_LOCKS.computeIfAbsent(storeId + "|" + tokenName, key -> new Object())) {
+            String refreshToken = getRefreshToken(storeId);
+            boolean rotatedMeanwhile = refreshToken != null && !refreshToken.equals(refreshTokenSeen);
+            if (rotatedMeanwhile || !accessTokenRejected) {
+                Optional<OAuth2AccessToken> access = tokenStore.getToken(
+                        storeId, tokenName, ACCESS_TOKEN, OAuth2AccessToken.class);
+                if (access.isPresent() && !access.get().isExpired()) {
+                    return access.get().getTokenValue();
+                }
+            }
+            if (refreshToken == null) {
+                return authorize(storeId);
+            } else {
+                return authenticate(storeId, refreshToken);
+            }
         }
     }
 
-    private synchronized String authorize(String storeId) {
+    private String authorize(String storeId) {
         OAuth2Secrets secrets = credentialStore.getSecrets(storeId, tokenName);
         try {
             return requestPasswordGrant(storeId, secrets);
@@ -176,7 +203,7 @@ public class ConfigurableOAuth2AuthorizationService {
         return authenticate(storeId, refreshToken, false);
     }
 
-    private synchronized String authenticate(String storeId, String refreshToken, boolean usingTokenRotatedElsewhere) {
+    private String authenticate(String storeId, String refreshToken, boolean usingTokenRotatedElsewhere) {
         OAuth2Secrets secrets = credentialStore.getSecrets(storeId, tokenName);
 
         Map<String, String> params = new LinkedHashMap<>();
@@ -197,8 +224,10 @@ public class ConfigurableOAuth2AuthorizationService {
             if (!usingTokenRotatedElsewhere) {
                 String stored = getRefreshToken(storeId);
                 if (stored != null && !stored.equals(refreshToken)) {
-                    // single-use refresh tokens (Allegro): another process spent this one first and stored the
-                    // rotated pair meanwhile; the authorization is fine, so use that pair instead of reporting a loss
+                    // single-use refresh tokens (Allegro): another process (the lock covers only this JVM) spent
+                    // this one first and stored the rotated pair meanwhile; the authorization is fine, so use that
+                    // pair instead of reporting a loss. Narrows the cross-process race, does not close it: the other
+                    // process may not have stored its pair yet when this read happens
                     log.info("Refresh token for {} was rotated by another process, using the stored one (store={})",
                             tokenName, storeId);
                     Optional<OAuth2AccessToken> access = tokenStore.getToken(
