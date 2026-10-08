@@ -172,7 +172,11 @@ public class ConfigurableOAuth2AuthorizationService {
         }
     }
 
-    private synchronized String authenticate(String storeId, String refreshToken) {
+    private String authenticate(String storeId, String refreshToken) {
+        return authenticate(storeId, refreshToken, false);
+    }
+
+    private synchronized String authenticate(String storeId, String refreshToken, boolean usingTokenRotatedElsewhere) {
         OAuth2Secrets secrets = credentialStore.getSecrets(storeId, tokenName);
 
         Map<String, String> params = new LinkedHashMap<>();
@@ -189,6 +193,21 @@ public class ConfigurableOAuth2AuthorizationService {
         } catch (HttpClientException e) {
             if (!isRefreshTokenRejected(e)) {
                 return null;
+            }
+            if (!usingTokenRotatedElsewhere) {
+                String stored = getRefreshToken(storeId);
+                if (stored != null && !stored.equals(refreshToken)) {
+                    // single-use refresh tokens (Allegro): another process spent this one first and stored the
+                    // rotated pair meanwhile; the authorization is fine, so use that pair instead of reporting a loss
+                    log.info("Refresh token for {} was rotated by another process, using the stored one (store={})",
+                            tokenName, storeId);
+                    Optional<OAuth2AccessToken> access = tokenStore.getToken(
+                            storeId, tokenName, ACCESS_TOKEN, OAuth2AccessToken.class);
+                    if (access.isPresent() && !access.get().isExpired()) {
+                        return access.get().getTokenValue();
+                    }
+                    return authenticate(storeId, stored, true);
+                }
             }
             if (secrets.getUsername() != null) {
                 // the refresh token was revoked together with the session, but a password grant can start a new one
