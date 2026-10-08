@@ -44,6 +44,12 @@ class RestApiWithRetryTest {
         }
 
         @Override
+        public BinaryResponse fetchBytes(String endpoint, Map<String, String> params, String accept) {
+            fetch(endpoint, params, String.class);
+            return new BinaryResponse(new byte[]{1, 2}, accept);
+        }
+
+        @Override
         public <T> T fetch(String endpoint, Map<String, String> params, Map<String, String> headers,
                            Class<T> responseType) {
             headersSeen.add(headers);
@@ -55,6 +61,20 @@ class RestApiWithRetryTest {
             headersSeen.add(headers);
             return fetch(endpoint, Map.of(), responseType);
         }
+    }
+
+    @Test
+    void fetchBytesRenewsTheTokenAfter401LikeOtherCalls() {
+        // given
+        FakeRestApi api = new FakeRestApi("at-renewed");
+        RestApiWithRetry retry = new RestApiWithRetry(api, () -> "at-cached", () -> "at-renewed");
+
+        // when
+        BinaryResponse response = retry.fetchBytesWithAuthRetry("/label", Map.of(), "application/pdf");
+
+        // then
+        assertEquals("application/pdf", response.contentType());
+        assertEquals(List.of("at-cached", "at-renewed"), api.tokensSet);
     }
 
     @Test

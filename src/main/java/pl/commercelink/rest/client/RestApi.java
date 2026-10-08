@@ -51,6 +51,11 @@ public class RestApi {
         return execute(buildGet(endpoint, params, headers), responseType);
     }
 
+    /** GET whose body is kept as bytes; accept is sent as the Accept header of this request. */
+    public BinaryResponse fetchBytes(String endpoint, Map<String, String> params, String accept) {
+        return httpClient.sendForBytes(buildGet(endpoint, params, Map.of("Accept", accept)));
+    }
+
     public <T> List<T> fetchList(String endpoint, Map<String, String> params, TypeReference<List<T>> responseType) {
         HttpRequest request = buildRequest(buildUrl(endpoint, params))
                 .GET()
