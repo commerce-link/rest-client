@@ -56,6 +56,14 @@ public class RestApi {
         return httpClient.sendForBytes(buildGet(endpoint, params, Map.of("Accept", accept)));
     }
 
+    /**
+     * POST with a JSON body whose answer is kept as bytes (a label generated on request). Headers given here override
+     * default headers with the same name for this request only; pass the expected Accept here.
+     */
+    public BinaryResponse postForBytes(String endpoint, Object body, Map<String, String> headers) {
+        return httpClient.sendForBytes(buildPost(endpoint, body, headers));
+    }
+
     public <T> List<T> fetchList(String endpoint, Map<String, String> params, TypeReference<List<T>> responseType) {
         HttpRequest request = buildRequest(buildUrl(endpoint, params))
                 .GET()

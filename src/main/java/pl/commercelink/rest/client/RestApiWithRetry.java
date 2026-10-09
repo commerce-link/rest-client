@@ -44,6 +44,10 @@ public class RestApiWithRetry {
         return executeWithAuthRetry(() -> restApi.fetchBytes(endpoint, params, accept));
     }
 
+    public BinaryResponse postForBytesWithAuthRetry(String endpoint, Object body, String accept) {
+        return executeWithAuthRetry(() -> restApi.postForBytes(endpoint, body, Map.of("Accept", accept)));
+    }
+
     public <T> T postWithAuthRetry(String endpoint, Object body, Class<T> responseType) {
         return executeWithAuthRetry(() -> restApi.post(endpoint, body, responseType));
     }
