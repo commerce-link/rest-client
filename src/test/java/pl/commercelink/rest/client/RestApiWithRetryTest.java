@@ -50,6 +50,13 @@ class RestApiWithRetryTest {
         }
 
         @Override
+        public BinaryResponse postForBytes(String endpoint, Object body, Map<String, String> headers) {
+            headersSeen.add(headers);
+            fetch(endpoint, Map.of(), String.class);
+            return new BinaryResponse(new byte[]{3, 4}, headers.get("Accept"));
+        }
+
+        @Override
         public <T> T fetch(String endpoint, Map<String, String> params, Map<String, String> headers,
                            Class<T> responseType) {
             headersSeen.add(headers);
@@ -366,5 +373,21 @@ class RestApiWithRetryTest {
         assertEquals(1, renewals.get());
         assertEquals(List.of(BETA, BETA, BETA), api.headersSeen);
         assertEquals(List.of("at-revoked", "at-new"), api.tokensSet);
+    }
+
+    @Test
+    void postForBytesRenewsTheTokenAfter401AndSendsAccept() {
+        // given
+        FakeRestApi api = new FakeRestApi("at-renewed");
+        RestApiWithRetry retry = new RestApiWithRetry(api, () -> "at-cached", () -> "at-renewed");
+
+        // when
+        BinaryResponse response = retry.postForBytesWithAuthRetry("/shipment-management/label",
+                Map.of("shipmentIds", List.of("s-1")), "application/octet-stream");
+
+        // then
+        assertEquals("application/octet-stream", response.contentType());
+        assertEquals(List.of("at-cached", "at-renewed"), api.tokensSet);
+        assertEquals(Map.of("Accept", "application/octet-stream"), api.headersSeen.get(0));
     }
 }
